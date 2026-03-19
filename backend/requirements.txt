@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic[email]
+email-validator
+pydantic-settings
+python-jose[cryptography]
+bcrypt
+python-multipart
+celery
+redis
+python-dotenv
+qrcode[pil]
+Pillow

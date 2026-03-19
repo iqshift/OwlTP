@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: whatsapp_otp_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_otp}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - otp_network
+
+  redis:
+    image: redis:alpine
+    container_name: whatsapp_otp_redis
+    restart: always
+    networks:
+      - otp_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./docker/backend.Dockerfile
+    container_name: whatsapp_otp_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password123}@db:5432/${POSTGRES_DB:-whatsapp_otp}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-supersecretkey}
+    volumes:
+      - ./backend:/app
+      - ./sessions:/sessions
+    depends_on:
+      - db
+      - redis
+    networks:
+      - otp_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: whatsapp_otp_frontend
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    networks:
+      - otp_network
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./docker/backend.Dockerfile
+    container_name: whatsapp_otp_worker
+    command: celery -A worker.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password123}@db:5432/${POSTGRES_DB:-whatsapp_otp}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./sessions:/sessions
+    depends_on:
+      - db
+      - redis
+    networks:
+      - otp_network
+
+networks:
+  otp_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
