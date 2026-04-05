@@ -21,7 +21,7 @@ export const useTranslationStore = create<TranslationState>()(
             fetchTranslations: async () => {
                 const { language } = get();
                 try {
-                    const response = await api.get(`/api/translations/${language}`);
+                    const response = await api.get(`/api/v1/translations/${language}`);
                     set({ translations: response.data });
                     // Set document direction for RTL support
                     if (typeof document !== 'undefined') {

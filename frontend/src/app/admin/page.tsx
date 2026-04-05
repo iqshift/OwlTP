@@ -5,7 +5,7 @@ import api from '@/lib/api';
 import Link from 'next/link';
 import { useAuthStore } from '@/store/auth';
 import { useRouter } from 'next/navigation';
-import { LogOut, LayoutDashboard, Shield } from 'lucide-react';
+import { LogOut, LayoutDashboard, Shield, Lock, Bell, User as UserIcon } from 'lucide-react';
 
 interface User {
     id: string;
@@ -21,6 +21,7 @@ export default function AdminPage() {
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [view, setView] = useState<'users' | 'security' | 'smtp'>('users');
     const { logout } = useAuthStore();
     const router = useRouter();
 
@@ -32,7 +33,7 @@ export default function AdminPage() {
     useEffect(() => {
         const fetchUsers = async () => {
             try {
-                const response = await api.get('/api/admin/users');
+                const response = await api.get('/admin/users');
                 setUsers(response.data);
             } catch (err: any) {
                 console.error('Error fetching users:', err);
@@ -63,10 +64,10 @@ export default function AdminPage() {
     }
 
     return (
-        <>
+        <div className="min-h-screen bg-slate-950 text-white">
             <div className="flex justify-between items-center bg-slate-900 border-b border-slate-800 p-4 sticky top-0 z-10 backdrop-blur-md bg-opacity-80">
                 <div className="flex items-center gap-6">
-                    <h2 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-blue-500 bg-clip-text text-transparent">OTP Admin</h2>
+                    <h2 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-blue-500 bg-clip-text text-transparent">OwlTP Admin</h2>
                     <div className="flex gap-4">
                         <Link href="/dashboard" className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors">
                             <LayoutDashboard size={18} />
@@ -94,7 +95,7 @@ export default function AdminPage() {
                 <div className="flex justify-between items-center">
                     <div>
                         <h1 className="text-3xl font-bold">Admin Panel</h1>
-                        <p className="text-slate-400">System management and user control.</p>
+                        <p className="text-slate-400">System management and active defense monitoring.</p>
                     </div>
                     <div className="bg-emerald-500/10 text-emerald-500 px-4 py-2 rounded-lg border border-emerald-500/20 text-sm font-bold">
                         System Online
@@ -111,65 +112,157 @@ export default function AdminPage() {
                         <p className="text-2xl font-bold">{users.filter(u => u.plan === 'enterprise').length}</p>
                     </div>
                     <div className="p-6 rounded-xl bg-slate-900 border border-slate-800">
-                        <p className="text-sm text-slate-400 mb-1">Total Active Admins</p>
-                        <p className="text-2xl font-bold">{users.filter(u => u.role === 'admin').length}</p>
+                        <p className="text-sm text-slate-400 mb-1">Active Guards</p>
+                        <p className="text-2xl font-bold text-emerald-400">V99 Active</p>
                     </div>
                 </div>
 
-                <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
-                    <table className="w-full text-left min-w-[600px]">
-                        <thead className="bg-slate-800/50">
-                            <tr>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">User</th>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Role</th>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Plan</th>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Usage</th>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Created</th>
-                                <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800">
-                            {users.map((user) => (
-                                <tr key={user.id} className="hover:bg-slate-800/20 transition-colors">
-                                    <td className="px-6 py-4">
-                                        <p className="font-medium">{user.email}</p>
-                                        <p className="text-xs text-slate-500">{user.id}</p>
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        <span className={`px-2 py-1 rounded text-xs font-bold ${user.role === 'admin' ? 'bg-purple-500/10 text-purple-500 border border-purple-500/20' : 'bg-blue-500/10 text-blue-500 border border-blue-500/20'}`}>
-                                            {user.role.toUpperCase()}
-                                        </span>
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        <span className={`px-2 py-1 rounded text-xs font-bold ${user.plan === 'enterprise' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-slate-700 text-slate-300'}`}>
-                                            {user.plan.toUpperCase()}
-                                        </span>
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        <p className="text-sm">
-                                            {user.messages_sent_month} / {user.monthly_quota === 0 ? '∞' : user.monthly_quota}
-                                        </p>
-                                    </td>
-                                    <td className="px-6 py-4 text-sm text-slate-400">
-                                        {new Date(user.created_at).toLocaleDateString()}
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        <button
-                                            onClick={() => window.location.href = `/admin/users/${user.id}`}
-                                            className="text-white bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-700 text-xs transition-colors"
-                                        >
-                                            Manage
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                {/* Tabs */}
+                <div className="flex gap-6 border-b border-slate-800">
+                    <button onClick={() => setView('users')} className={`pb-3 px-1 text-sm font-bold transition-all flex items-center gap-2 ${view === 'users' ? 'text-emerald-400 border-b-2 border-emerald-400' : 'text-slate-500 hover:text-white'}`}>
+                        <UserIcon size={16} /> Users
+                    </button>
+                    <button onClick={() => setView('security')} className={`pb-3 px-1 text-sm font-bold transition-all flex items-center gap-2 ${view === 'security' ? 'text-red-400 border-b-2 border-red-400' : 'text-slate-500 hover:text-white'}`}>
+                        <Shield size={16} /> Security Radar
+                    </button>
+                    <button onClick={() => setView('smtp')} className={`pb-3 px-1 text-sm font-bold transition-all flex items-center gap-2 ${view === 'smtp' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-slate-500 hover:text-white'}`}>
+                        <Bell size={16} /> SMTP
+                    </button>
                 </div>
-                {/* SMTP Settings Section */}
-                <SmtpSettingsPanel />
+
+                {view === 'users' && <UserTable users={users} />}
+                {view === 'security' && <SecurityRadar />}
+                {view === 'smtp' && <SmtpSettingsPanel />}
             </div>
-        </>
+        </div>
+    );
+}
+
+function UserTable({ users }: { users: User[] }) {
+    return (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
+            <table className="w-full text-left min-w-[600px]">
+                <thead className="bg-slate-800/50">
+                    <tr>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">User</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Role</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Plan</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Usage</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Created</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Actions</th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                    {users.map((user) => (
+                        <tr key={user.id} className="hover:bg-slate-800/20 transition-colors">
+                            <td className="px-6 py-4">
+                                <p className="font-medium">{user.email}</p>
+                                <p className="text-xs text-slate-500">{user.id}</p>
+                            </td>
+                            <td className="px-6 py-4">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${user.role === 'admin' ? 'bg-purple-500/10 text-purple-500 border border-purple-500/20' : 'bg-blue-500/10 text-blue-500 border border-blue-500/20'}`}>
+                                    {user.role.toUpperCase()}
+                                </span>
+                            </td>
+                            <td className="px-6 py-4">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${user.plan === 'enterprise' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' : 'bg-slate-700 text-slate-300'}`}>
+                                    {user.plan.toUpperCase()}
+                                </span>
+                            </td>
+                            <td className="px-6 py-4">
+                                <p className="text-sm">
+                                    {user.messages_sent_month} / {user.monthly_quota === 0 ? '∞' : user.monthly_quota}
+                                </p>
+                            </td>
+                            <td className="px-6 py-4 text-sm text-slate-400">
+                                {new Date(user.created_at).toLocaleDateString()}
+                            </td>
+                            <td className="px-6 py-4">
+                                <button
+                                    onClick={() => window.location.href = `/admin/users/${user.id}`}
+                                    className="text-white bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-700 text-xs transition-colors"
+                                >
+                                    Manage
+                                </button>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+function SecurityRadar() {
+    const [stats, setStats] = useState<any>(null);
+    const [loading, setLoading] = useState(true);
+
+    const fetchStats = async () => {
+        try {
+            const res = await api.get('/admin/security/stats');
+            setStats(res.data);
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchStats();
+        const interval = setInterval(fetchStats, 10000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleUnban = async (ip: string) => {
+        try {
+            await api.delete(`/admin/security/bans/${ip}`);
+            fetchStats();
+        } catch (err) { alert("Failed to unban"); }
+    };
+
+    if (loading) return <div className="animate-pulse h-40 bg-slate-900 rounded-xl" />;
+
+    return (
+        <div className="space-y-8 animate-in fade-in duration-500">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+                    <h3 className="text-lg font-bold text-red-500 mb-4 flex items-center gap-2">
+                        <Shield size={20} /> Active IP Bans ({stats?.banned_ips?.length || 0})
+                    </h3>
+                    <div className="space-y-3">
+                        {stats?.banned_ips?.length === 0 ? (
+                            <p className="text-sm text-slate-500 italic">No IPs currently restricted.</p>
+                        ) : stats?.banned_ips?.map((b: any) => (
+                            <div key={b.ip} className="flex justify-between items-center bg-slate-950 p-3 rounded-lg border border-red-500/10">
+                                <div>
+                                    <p className="text-sm font-mono text-white">{b.ip}</p>
+                                    <p className="text-[10px] text-slate-500">TTL: {Math.floor(b.ttl / 60)}m {b.ttl % 60}s</p>
+                                </div>
+                                <button onClick={() => handleUnban(b.ip)} className="text-[10px] bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white px-2 py-1 rounded transition-all">UNBAN</button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+                    <h3 className="text-lg font-bold text-amber-500 mb-4 flex items-center gap-2">
+                        <Lock size={20} /> Recent Threat Events (Threshold: {stats?.threshold})
+                    </h3>
+                    <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 scrollbar-thin">
+                        {stats?.recent_threats?.map((t: any) => (
+                            <div key={t.id} className="text-xs p-3 bg-slate-950 rounded-lg border border-slate-800">
+                                <div className="flex justify-between mb-1">
+                                    <span className="text-red-400 font-bold">{t.action}</span>
+                                    <span className="text-slate-500">{new Date(t.created_at).toLocaleTimeString()}</span>
+                                </div>
+                                <p className="text-slate-400">IP: <span className="font-mono">{t.ip_address}</span></p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </div>
     );
 }
 
@@ -209,8 +302,10 @@ function SmtpSettingsPanel() {
         }
     };
 
+    if (smtpLoading) return <div className="animate-pulse h-40 bg-slate-900 rounded-xl" />;
+
     return (
-        <div className="mt-10 bg-slate-900 border border-slate-800 rounded-xl p-6">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
             <div className="flex items-center gap-3 mb-6">
                 <div className="p-2 bg-blue-500/10 rounded-lg text-blue-400">
                     <Shield size={20} />

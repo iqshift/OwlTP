@@ -18,6 +18,13 @@ def get_redis() -> redis.Redis:
     return _redis_client
 
 
+def close_redis():
+    global _redis_client
+    if _redis_client:
+        _redis_client.close()
+        _redis_client = None
+
+
 def check_rate_limit(token: str, limit_per_minute: int = 30) -> bool:
     """
     Simple fixed-window rate limiter per API token.

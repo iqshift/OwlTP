@@ -2,7 +2,7 @@
 FROM golang:1.24-bookworm AS cli-builder
 WORKDIR /src/whatsapp-cli
 COPY ./whatsapp-cli .
-RUN go mod download && go build -o /usr/local/bin/whatsapp-cli main.go
+RUN go mod download && go mod tidy && go build -o /usr/local/bin/whatsapp-cli main.go
 
 # Stage 2: Final Backend Image
 FROM python:3.12-slim

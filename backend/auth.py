@@ -3,14 +3,38 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-import os
-from dotenv import load_dotenv
+import secrets
+from cryptography.fernet import Fernet
+from config import settings
 
-load_dotenv()
+# Use settings from config.py
+SECRET_KEY = settings.JWT_SECRET
+ALGORITHM = settings.JWT_ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
-SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week
+# 🔐 API Token Reversible Encryption (Fernet)
+TOKEN_CIPHER = Fernet(settings.TOKEN_ENCRYPTION_KEY.encode())
+
+def encrypt_token(token: str) -> str:
+    """Encrypts a token using Fernet."""
+    if not token: return ""
+    return TOKEN_CIPHER.encrypt(token.encode()).decode()
+
+def decrypt_token(encrypted_token: str) -> str:
+    """Decrypts a token using Fernet. Returns empty string if failed."""
+    if not encrypted_token or len(encrypted_token) < 10: return ""
+    try:
+        return TOKEN_CIPHER.decrypt(encrypted_token.encode()).decode()
+    except Exception:
+        return ""
+
+def hash_token(token: str) -> str:
+    """Returns a SHA-256 hash of the token."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def generate_secure_token(prefix: str = "ot_") -> str:
+    """Generates a secure plaintext token."""
+    return f"{prefix}{secrets.token_hex(20)}"
 
 def _get_pre_hashed_password(password: str) -> bytes:
     """Hash password with SHA256 to ensure it's always stable and safe for bcrypt."""
@@ -26,7 +50,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 def get_password_hash(password: str) -> str:
-    # Use bcrypt directly to avoid passlib bugs in Python 3.12
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(_get_pre_hashed_password(password), salt)
     return hashed.decode("utf-8")

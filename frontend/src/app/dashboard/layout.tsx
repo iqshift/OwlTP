@@ -11,6 +11,7 @@ import {
   Globe,
   Menu,
   X,
+  Send,
 } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
@@ -55,7 +56,7 @@ export default function DashboardLayout({
     let interval: NodeJS.Timeout | undefined;
     const pollStatus = async () => {
       try {
-        const res = await api.get("/api/whatsapp/status");
+        const res = await api.get("/whatsapp/status");
         const status = res.data.status as "connected" | "disconnected" | "authenticating";
         setConnectionStatus(status);
       } catch {
@@ -73,7 +74,7 @@ export default function DashboardLayout({
     { name: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
     { name: "WhatsApp Link", icon: Link2, href: "/dashboard/connect" },
     { name: "API Keys", icon: Key, href: "/dashboard/keys" },
-    { name: "Send Test Message", icon: Key, href: "/dashboard/send" },
+    { name: "Send Test Message", icon: Send, href: "/dashboard/send" },
     { name: "Logs", icon: History, href: "/dashboard/logs" },
     { name: "Settings", icon: Settings, href: "/dashboard/settings" },
   ];

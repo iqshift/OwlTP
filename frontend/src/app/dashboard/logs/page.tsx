@@ -25,11 +25,13 @@ export default function LogsPage() {
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadLogs = async (pageNum: number, searchTerm: string) => {
     setLoading(true);
+    setError(null);
     try {
-      const res = await api.get<PaginatedResponse>("/api/logs", {
+      const res = await api.get<PaginatedResponse>("/logs", {
         params: {
           page: pageNum,
           page_size: pageSize,
@@ -38,6 +40,9 @@ export default function LogsPage() {
       });
       setLogs(res.data.items);
       setTotal(res.data.total);
+    } catch (err: any) {
+      console.error("LOGS_FETCH_ERROR:", err);
+      setError(err?.response?.data?.detail || "Failed to load logs. Please check API connection.");
     } finally {
       setLoading(false);
     }
@@ -58,6 +63,11 @@ export default function LogsPage() {
           <p className="text-slate-400">
             View the history of sent messages and their delivery status.
           </p>
+          {error && (
+            <p className="mt-2 text-sm font-bold text-red-500">
+              ⚠️ {error}
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
           <input

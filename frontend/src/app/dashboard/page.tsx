@@ -11,8 +11,9 @@ interface Stat {
 
 interface RecentActivity {
     id: string;
-    phone: string;
+    phone?: string;
     status: string;
+    action?: string; // For Audit Logs
     created_at: string;
 }
 
@@ -28,6 +29,7 @@ interface DashboardData {
     monthly_usage: string;
     plan: string;
     recent_activity: RecentActivity[];
+    recent_audit: any[]; // Phase 8: Operational logs
     daily_stats: DailyStat[];
 }
 
@@ -146,7 +148,7 @@ export default function DashboardPage() {
     useEffect(() => {
         const fetchStats = async () => {
             try {
-                const response = await api.get('/api/stats');
+                const response = await api.get('/stats');
                 const data: DashboardData = response.data;
 
                 setStats([
@@ -156,7 +158,22 @@ export default function DashboardPage() {
                     { name: 'Monthly Credits', value: data.monthly_usage, change: `Plan: ${data.plan}` },
                 ]);
 
-                setRecentActivity(data.recent_activity);
+                // Merge Logs: Prioritize OTPs, fallback to Audit if OTPs empty
+                if (data.recent_activity && data.recent_activity.length > 0) {
+                    setRecentActivity(data.recent_activity);
+                } else if (data.recent_audit && data.recent_audit.length > 0) {
+                    // Transform Audit to RecentActivity shape
+                    const auditAsActivity = data.recent_audit.map((a: any) => ({
+                        id: a.id,
+                        action: a.action,
+                        status: 'audit',
+                        created_at: a.created_at
+                    }));
+                    setRecentActivity(auditAsActivity);
+                } else {
+                    setRecentActivity([]);
+                }
+
                 setDailyStats(data.daily_stats);
             } catch (error) {
                 console.error('Error fetching dashboard stats:', error);
@@ -203,11 +220,18 @@ export default function DashboardPage() {
                     <h3 className="font-bold mb-4">Recent Activity</h3>
                     <div className="space-y-4">
                         {recentActivity.length > 0 ? recentActivity.map((activity) => (
-                            <div key={activity.id} className="flex items-center gap-3 text-sm">
-                                <div className={`w-2 h-2 rounded-full ${activity.status === 'sent' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            <div key={activity.id} className="flex items-center gap-3 text-sm group">
+                                <div className={`w-2 h-2 rounded-full ${
+                                    activity.status === 'sent' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 
+                                    activity.status === 'audit' ? 'bg-blue-400' : 'bg-red-500'
+                                }`}></div>
                                 <div className="flex-1">
-                                    <p className="font-medium">OTP {activity.status === 'sent' ? 'Sent' : 'Failed'} to {activity.phone}</p>
-                                    <p className="text-slate-500 text-xs">
+                                    <p className="font-medium">
+                                        {activity.status === 'audit' 
+                                            ? `Action: ${activity.action}` 
+                                            : `OTP ${activity.status === 'sent' ? 'Sent' : 'Failed'} to ${activity.phone}`}
+                                    </p>
+                                    <p className="text-slate-500 text-[10px] font-mono">
                                         {new Date(activity.created_at).toLocaleString()}
                                     </p>
                                 </div>

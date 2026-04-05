@@ -1,52 +1,57 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import api from "@/lib/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 type APIKeyData = {
   api_token: string;
+  is_token_masked: boolean;
   plan: string;
   monthly_quota: number;
   messages_sent_month: number;
 };
 
 export default function APIKeysPage() {
-  const [data, setData] = useState<APIKeyData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [activeLang, setActiveLang] = useState<string>("curl");
   const [showToken, setShowToken] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
 
-  const loadKeys = async () => {
-    setLoading(true);
-    try {
-      const res = await api.get<APIKeyData>("/api/keys");
-      setData(res.data);
-      setError(null);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to load API key");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data, isLoading, error: queryError } = useQuery<APIKeyData>({
+    queryKey: ["api-key"],
+    queryFn: async () => {
+      const res = await api.get("/keys");
+      return res.data;
+    },
+  });
 
-  useEffect(() => {
-    loadKeys();
-  }, []);
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const res = await api.post("/keys/regenerate");
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["api-key"] });
+    },
+  });
 
   const handleCopy = () => {
     if (!data?.api_token) return;
-    navigator.clipboard.writeText(data.api_token).catch(() => { });
+    navigator.clipboard.writeText(data.api_token).then(() => {
+      setCopiedSnippet(true);
+      setTimeout(() => setCopiedSnippet(false), 2000);
+    });
   };
 
-  const handleRegenerate = async () => {
-    try {
-      const res = await api.post<APIKeyData>("/api/keys/regenerate");
-      setData(res.data);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to regenerate token");
+  const handleRegenerate = () => {
+    if (confirm("Are you sure? Old keys will stop working immediately.")) {
+      mutation.mutate();
     }
   };
+
+  const loading = isLoading || mutation.isPending;
+  const error = (queryError as any)?.response?.data?.detail || (mutation.error as any)?.response?.data?.detail || null;
 
   const HighlightedCode = ({ code }: { code: string }) => {
     // VS Code inspired colors (One Dark Pro)
@@ -89,7 +94,9 @@ export default function APIKeysPage() {
 
   const getCodeSnippet = () => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const token = data?.api_token || "YOUR_API_TOKEN";
+    const token = (!data?.api_token || data.is_token_masked || !showToken) 
+      ? "••••••••••••••••••••••••••••••••" 
+      : data.api_token;
 
     switch (activeLang) {
       case "python":
@@ -205,14 +212,14 @@ public class Main {
             <div className="flex gap-2">
               <button
                 onClick={() => setShowToken(!showToken)}
-                disabled={!data}
+                disabled={!data || (data.is_token_masked && !showToken)}
                 className="flex-1 sm:flex-none rounded-md bg-slate-800 px-4 py-2 text-sm font-bold transition-colors hover:bg-slate-700 disabled:opacity-60"
               >
-                {showToken ? "Hide" : "Show"}
+                {data?.is_token_masked ? "Masked" : (showToken ? "Hide" : "Show")}
               </button>
               <button
                 onClick={handleCopy}
-                disabled={!data}
+                disabled={!data || data.is_token_masked}
                 className="flex-1 sm:flex-none rounded-md bg-slate-800 px-4 py-2 text-sm font-bold transition-colors hover:bg-slate-700 disabled:opacity-60"
               >
                 Copy
@@ -227,29 +234,24 @@ public class Main {
           </div>
         </div>
 
-        <div className="rounded-md border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-500">
-          Regenerating your token will invalidate the old one immediately. All
-          your current integrations will stop working.
-        </div>
+        {data?.is_token_masked && (
+          <div className="rounded-md border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-sm text-orange-400 font-bold">
+            ⚠️ Legacy Security: Your current token was created with an older security protocol and cannot be displayed. Please Regenerate to enable the "Show" feature.
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-4 text-sm">
           <div>
-            <p className="text-slate-400">Plan</p>
-            <p className="font-semibold capitalize text-slate-100">
-              {data?.plan || "-"}
-            </p>
+            <p className="text-slate-500 text-xs mb-1">Plan</p>
+            <p className="font-bold text-white capitalize">{data?.plan || "Free"}</p>
           </div>
           <div>
-            <p className="text-slate-400">Monthly quota</p>
-            <p className="font-semibold text-slate-100">
-              {data?.monthly_quota ?? "-"}
-            </p>
+            <p className="text-slate-500 text-xs mb-1">Monthly quota</p>
+            <p className="font-bold text-white">{data?.monthly_quota === 0 ? "∞" : data?.monthly_quota}</p>
           </div>
           <div>
-            <p className="text-slate-400">Used this month</p>
-            <p className="font-semibold text-slate-100">
-              {data?.messages_sent_month ?? "-"}
-            </p>
+            <p className="text-slate-500 text-xs mb-1">Used this month</p>
+            <p className="font-bold text-white">{data?.messages_sent_month || 0}</p>
           </div>
         </div>
 
@@ -282,12 +284,18 @@ public class Main {
         <div className="relative group overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 font-mono text-sm leading-relaxed">
           <button
             onClick={() => {
-              const code = getCodeSnippet();
-              navigator.clipboard.writeText(code);
+              const snippet = getCodeSnippet();
+              navigator.clipboard.writeText(snippet);
+              setCopiedSnippet(true);
+              setTimeout(() => setCopiedSnippet(false), 2000);
             }}
-            className="absolute right-4 top-4 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 hover:bg-slate-700 text-white px-3 py-1 rounded text-xs font-bold border border-slate-700"
+            className={`absolute right-4 top-4 rounded-md px-3 py-1.5 text-[10px] font-bold transition-all border ${
+              copiedSnippet 
+                ? "bg-green-600 border-green-500 text-white shadow-[0_0_15px_rgba(22,163,74,0.4)]" 
+                : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:border-slate-600"
+            }`}
           >
-            Copy Code
+            {copiedSnippet ? "Copied! ✓" : "Copy Code"}
           </button>
           <pre className="text-slate-300 whitespace-pre-wrap leading-relaxed">
             <HighlightedCode code={getCodeSnippet()} />

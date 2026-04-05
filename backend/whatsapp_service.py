@@ -5,6 +5,8 @@ import subprocess
 import time
 import io
 import base64
+import random
+from datetime import datetime, timezone
 import qrcode
 from typing import Optional, List, Dict, Any
 
@@ -17,14 +19,20 @@ class WhatsAppService:
         /sessions/{user_id}/store/
     """
 
-    def __init__(self, sessions_base_path: str = "/sessions", cli_path: str = "/usr/local/bin/whatsapp-cli"):
+    def __init__(self, sessions_base_path: str = "/sessions", cli_path: str = "/usr/local/bin/whatsapp-cli", redis_url: str = None):
         self.sessions_base_path = sessions_base_path
         self.cli_path = cli_path
+        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
 
     def get_session_dir(self, user_id: str) -> str:
         # Each user has their own storage directory
         path = os.path.join(self.sessions_base_path, str(user_id))
         os.makedirs(path, exist_ok=True)
+        # 🔑 Operational Integrity: Restrict permissions to owner only (chmod 700)
+        try:
+            os.chmod(path, 0o700)
+        except Exception:
+            pass
         return path
 
     def _is_pid_valid(self, pid: int) -> bool:
@@ -48,8 +56,17 @@ class WhatsAppService:
             return False
 
     def run_command(self, user_id: str, command: List[str]) -> Dict[str, Any]:
+        """Runs a CLI command, temporarily pausing the listen daemon if active to avoid session conflicts."""
         session_dir = self.get_session_dir(user_id)
-        # Use --store flag as per CLI readme
+        
+        # 1. Mutex: Check if listen daemon is running and stop it temporarily
+        was_listening = self.is_listen_daemon_running(user_id)
+        if was_listening:
+            print(f"INFO: Pausing listen daemon for user {user_id} to execute command: {command[0]}")
+            self.stop_listen_daemon(user_id)
+            time.sleep(0.5) # Wait for session release
+
+        # 2. Execute ephemeral command
         full_command = [self.cli_path, "--store", session_dir] + command
 
         try:
@@ -83,10 +100,75 @@ class WhatsAppService:
             return {"success": False, "error": "CLI command timed out"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        finally:
+            # 3. Mutex: Resume listen daemon if it was running before
+            if was_listening:
+                print(f"INFO: Resuming listen daemon for user {user_id}")
+                self.start_listen_daemon(user_id, self.redis_url)
+
+    def is_listen_daemon_running(self, user_id: str) -> bool:
+        """Checks if the listen daemon PID file exists and the process is valid."""
+        session_dir = self.get_session_dir(user_id)
+        lock_file = os.path.join(session_dir, "listen.pid")
+        if os.path.exists(lock_file):
+            try:
+                with open(lock_file, "r") as f:
+                    pid = int(f.read().strip())
+                return self._is_pid_valid(pid)
+            except Exception:
+                return False
+        return False
 
     def send_message(self, user_id: str, phone: str, message: str) -> Dict[str, Any]:
+        """Simple send message command."""
         # Use --to instead of --phone as per CLI readme
         return self.run_command(user_id, ["send", "--to", phone, "--message", message])
+
+    def send_presence(self, user_id: str, phone: str, is_typing: bool = True) -> Dict[str, Any]:
+        """Sets the typing indicator for a recipient."""
+        presence_type = "typing" if is_typing else "paused"
+        return self.run_command(user_id, ["presence", "--to", phone, "--type", presence_type])
+
+    def is_sleep_time(self) -> bool:
+        """Checks if current time is within 2 AM to 7 AM sleep window."""
+        now = datetime.now()
+        return 2 <= now.hour < 7
+
+    def send_message_advanced(self, user_id: str, phone: str, message: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Sends a message with Anti-Ban tactics applied:
+        1. Randomized Delays
+        2. Human Simulation (Typing indicator)
+        3. Sleep Cycles
+        4. Dynamic Data (Unique hash)
+        """
+        # 1. Sleep Cycles Check
+        if settings.get("sleep_cycles") == "true" and self.is_sleep_time():
+            return {"success": False, "error": "System is in sleep cycle (2 AM - 7 AM). Message queued or rejected."}
+
+        # 2. Randomized Delay (Pre-send)
+        if settings.get("account_protection") == "true":
+            delay = random.uniform(5, 15) # Smaller initial delay
+            print(f"DEBUG Anti-Ban: Delaying for {delay:.1f}s before sending to {phone}")
+            time.sleep(delay)
+
+        # 3. Human Simulation (Typing...)
+        if settings.get("account_protection") == "true":
+            print(f"DEBUG Anti-Ban: Simulating typing for {phone}...")
+            self.send_presence(user_id, phone, True)
+            time.sleep(random.uniform(3, 5)) # Simulate typing duration
+            # We don't need to explicitly stop it as sending the message usually stops it, 
+            # but we can call 'paused' if we want to be safe.
+
+        # 4. Dynamic Data / Message Variation (Final payload)
+        final_message = message
+        if settings.get("account_protection") == "true":
+            # Use invisible random variations instead of visible timestamps
+            invis_chars = ["\u200B", "\u200C", "\u200D", "\uFEFF"]
+            final_message += random.choice(invis_chars) * random.randint(1, 3)
+
+        # 5. Execute Send
+        return self.send_message(user_id, phone, final_message)
 
     def stop_auth(self, user_id: str, deep_clean: bool = False) -> bool:
         """
@@ -272,8 +354,14 @@ class WhatsAppService:
 
     def get_status(self, user_id: str) -> Dict[str, Any]:
         """
-        Quick check of the actual connection status via CLI.
+        Gets the connection status. Optimized to avoid pausing the listen daemon 
+        if it's already running (as it implies a connected state).
         """
+        # If the listen daemon is running, it means the session is held and connected.
+        if self.is_listen_daemon_running(user_id):
+            return {"success": True, "status": "connected"}
+
+        # Otherwise, run the CLI command (which requires a temporary pause if any other process exists)
         return self.run_command(user_id, ["status"])
 
     def sync_session(self, user_id: str) -> Dict[str, Any]:
@@ -319,6 +407,59 @@ class WhatsAppService:
         """Stops the background sync process."""
         session_dir = self.get_session_dir(user_id)
         lock_file = os.path.join(session_dir, "sync.pid")
+        if os.path.exists(lock_file):
+            try:
+                with open(lock_file, "r") as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+                if self._is_pid_valid(pid):
+                    os.kill(pid, signal.SIGKILL)
+                os.remove(lock_file)
+                return True
+            except Exception:
+                if os.path.exists(lock_file): os.remove(lock_file)
+        return False
+
+    def start_listen_daemon(self, user_id: str, redis_url: str) -> Dict[str, Any]:
+        """
+        Starts a background 'listen' daemon that pushes events to Redis.
+        Used for real-time Interaction Strategy.
+        """
+        session_dir = self.get_session_dir(user_id)
+        lock_file = os.path.join(session_dir, "listen.pid")
+        log_file = os.path.join(session_dir, "listen.log")
+
+        # Stop existing if any
+        self.stop_listen_daemon(user_id)
+
+        # Start process
+        print(f"DEBUG: Starting Listen Daemon for user {user_id}")
+        full_command = [
+            self.cli_path, 
+            "--store", session_dir, 
+            "listen", 
+            "--redis-url", redis_url,
+            "--user-id", user_id
+        ]
+        try:
+            log_f = open(log_file, "a")
+            process = subprocess.Popen(
+                full_command,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True
+            )
+            with open(lock_file, "w") as f:
+                f.write(str(process.pid))
+            return {"success": True, "message": "Listen daemon started", "pid": process.pid}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def stop_listen_daemon(self, user_id: str) -> bool:
+        """Stops the background listen daemon."""
+        session_dir = self.get_session_dir(user_id)
+        lock_file = os.path.join(session_dir, "listen.pid")
         if os.path.exists(lock_file):
             try:
                 with open(lock_file, "r") as f:

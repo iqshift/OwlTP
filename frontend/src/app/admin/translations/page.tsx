@@ -28,7 +28,7 @@ export default function AdminTranslationsPage() {
 
     const fetchTranslations = async () => {
         try {
-            const response = await api.get('/api/admin/translations');
+            const response = await api.get('/admin/translations');
             setTranslations(response.data);
         } catch (error) {
             console.error('Failed to fetch translations:', error);

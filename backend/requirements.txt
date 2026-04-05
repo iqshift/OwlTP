@@ -13,3 +13,9 @@ redis
 python-dotenv
 qrcode[pil]
 Pillow
+cryptography
+slowapi
+limits
+alembic
+python-json-logger
+httpx

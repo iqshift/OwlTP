@@ -6,13 +6,14 @@ import { useQuery } from "@tanstack/react-query";
 
 type APIKeyData = {
   api_token: string;
+  is_token_masked: boolean;
 };
 
 export default function SendTestMessagePage() {
   const { data } = useQuery<APIKeyData>({
-    queryKey: ["api-key-for-send"],
+    queryKey: ["api-key"],
     queryFn: async () => {
-      const res = await api.get("/api/keys");
+      const res = await api.get("/keys");
       return res.data;
     },
   });
@@ -30,32 +31,33 @@ export default function SendTestMessagePage() {
       setError("API token not loaded");
       return;
     }
+    if (data?.is_token_masked) {
+      setError("Your API token is masked for security. Please go to the API Keys page and Regenerate a new token to use this feature.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setResult(null);
+
     try {
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/send`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${data.api_token}`,
-          },
-          body: JSON.stringify({
-            phone,
-            message: message || undefined,
-            code: code || undefined
-          }),
+      const res = await api.post("/send", {
+        phone: phone,
+        code: code,
+      }, {
+        headers: {
+          Authorization: `Bearer ${data.api_token}`,
         },
-      );
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || "Send failed");
+      });
+
+      if (res.data.success) {
+        setResult("تم إرسال الكود بنجاح! تحقق من الجلسة النشطة.");
+      } else {
+        setError(res.data.error || "فشل الإرسال. تأكد من اتصال WhatsApp.");
       }
-      setResult(`Message sent with id: ${json.message_id}`);
     } catch (err: any) {
-      setError(err?.message || "Failed to send message");
+      console.error("SEND_TEST_ERROR:", err);
+      setError(err?.response?.data?.detail || "خطأ في الاتصال بالخادم. تأكد من صحة التوكن والبيانات.");
     } finally {
       setLoading(false);
     }

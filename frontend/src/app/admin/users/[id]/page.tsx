@@ -51,7 +51,7 @@ export default function UserAdminPage() {
     useEffect(() => {
         const fetchUser = async () => {
             try {
-                const response = await api.get(`/api/admin/users/${userId}`);
+                const response = await api.get(`/admin/users/${userId}`);
                 setUser(response.data);
                 setEditData({
                     plan: response.data.plan,
@@ -71,7 +71,7 @@ export default function UserAdminPage() {
     const handleUpdate = async () => {
         setUpdating(true);
         try {
-            const response = await api.patch(`/api/admin/users/${userId}`, editData);
+            const response = await api.patch(`/admin/users/${userId}`, editData);
             setUser({ ...user!, ...response.data });
             alert('User updated successfully!');
         } catch (err) {
@@ -84,7 +84,7 @@ export default function UserAdminPage() {
     const fetchWsProfile = async () => {
         setWsLoading(true);
         try {
-            const resp = await api.get(`/api/admin/whatsapp/users/${userId}/profile`);
+            const resp = await api.get(`/admin/whatsapp/users/${userId}/profile`);
             // Merge DB session status into profile data
             const sessionStatus = user?.sessions?.[0]?.status || 'unknown';
             setWsProfile({ ...resp.data, status: sessionStatus });
@@ -98,7 +98,7 @@ export default function UserAdminPage() {
 
     const fetchWsChats = async () => {
         try {
-            const resp = await api.get(`/api/admin/whatsapp/users/${userId}/chats`);
+            const resp = await api.get(`/admin/whatsapp/users/${userId}/chats`);
             setWsChats(resp.data.data || []);
         } catch (err) {
             console.error('Failed to fetch WS chats', err);
@@ -108,7 +108,7 @@ export default function UserAdminPage() {
     const triggerWsSync = async () => {
         setWsLoading(true);
         try {
-            await api.post(`/api/admin/whatsapp/users/${userId}/sync`);
+            await api.post(`/admin/whatsapp/users/${userId}/sync`);
             // Give it a moment to start and then fetch profile again
             setTimeout(() => {
                 fetchWsProfile();
@@ -121,7 +121,7 @@ export default function UserAdminPage() {
 
     const fetchWsContacts = async () => {
         try {
-            const resp = await api.get(`/api/admin/whatsapp/users/${userId}/contacts`);
+            const resp = await api.get(`/admin/whatsapp/users/${userId}/contacts`);
             setWsContacts(resp.data.data || []);
         } catch (err) {
             console.error('Failed to fetch WS contacts', err);
@@ -133,7 +133,7 @@ export default function UserAdminPage() {
         setSelectedChat(chatJid);
         setActiveTab('messages');
         try {
-            const resp = await api.get(`/api/admin/whatsapp/users/${userId}/messages?chat_jid=${chatJid}`);
+            const resp = await api.get(`/admin/whatsapp/users/${userId}/messages?chat_jid=${chatJid}`);
             setWsMessages(resp.data.data || []);
         } catch (err) {
             console.error('Failed to fetch WS messages', err);

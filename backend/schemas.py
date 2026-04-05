@@ -14,7 +14,7 @@ class UserCreate(UserBase):
 
 class UserResponse(UserBase):
     id: UUID
-    api_token: str
+    api_token: Optional[str] = None # Only populated on generation or migration
     created_at: datetime
     plan: str
     role: str
@@ -24,6 +24,16 @@ class UserResponse(UserBase):
     greeting_text: str
     notify_on_fail: str
     notify_email: Optional[str] = None
+    account_protection: str
+    interaction_strategy: str
+    interaction_question: str
+    interaction_keywords: str
+    sleep_cycles: str
+    spintax_enabled: str
+    spintax_1: str
+    spintax_2: str
+    spintax_3: str
+    smart_rotation: str
 
     class Config:
         from_attributes = True
@@ -33,14 +43,15 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
-
 class Token(BaseModel):
     access_token: str
+    refresh_token: str # New field for sliding sessions
     token_type: str = "bearer"
 
 
 class APIKeyResponse(BaseModel):
     api_token: str
+    is_token_masked: bool
     plan: str
     monthly_quota: int
     messages_sent_month: int
@@ -121,10 +132,20 @@ class UserAdminUpdate(BaseModel):
 
 
 class UserSettingsUpdate(BaseModel):
-    otp_template: str
+    otp_template: Optional[str] = None
     greeting_text: Optional[str] = None
     notify_on_fail: Optional[str] = None
     notify_email: Optional[str] = None
+    account_protection: Optional[str] = None
+    interaction_strategy: Optional[str] = None
+    interaction_question: Optional[str] = None
+    interaction_keywords: Optional[str] = None
+    sleep_cycles: Optional[str] = None
+    spintax_enabled: Optional[str] = None
+    spintax_1: Optional[str] = None
+    spintax_2: Optional[str] = None
+    spintax_3: Optional[str] = None
+    smart_rotation: Optional[str] = None
 
 
 class ChangePasswordRequest(BaseModel):

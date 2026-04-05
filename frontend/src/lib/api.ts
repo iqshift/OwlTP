@@ -2,7 +2,7 @@
 
 import axios from "axios";
 
-const baseURL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const baseURL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000") + "/api/v1";
 
 export const api = axios.create({
   baseURL,
@@ -10,10 +10,13 @@ export const api = axios.create({
 
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    const token = window.localStorage.getItem("auth_token");
-    if (token) {
-      config.headers = config.headers || {};
-      config.headers.Authorization = `Bearer ${token}`;
+    // CRITICAL: ONLY set session token if NO Authorization header is manually provided
+    // This allows the Send Test Message page to use its own API Token.
+    if (!config.headers.Authorization) {
+      const token = window.localStorage.getItem("auth_token");
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
     }
   }
   return config;

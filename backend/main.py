@@ -1,31 +1,98 @@
+import logging
+from pythonjsonlogger import jsonlogger
 from datetime import datetime, timezone, timedelta
 import uuid
+import os
 import io
 import base64
 import qrcode
 import time
 from typing import List, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, status, Security, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Security, Query, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import JWTError, jwt
 from sqlalchemy import text, func
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+# Initializing Rate Limiter with Redis
 
 import models, schemas, auth, database, whatsapp_service, redis_client, email_service
+from worker import send_otp_message
+from config import settings
+from audit import log_action
 
+#  Eye V99 Observability: Structured JSON Logging
+log_handler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
+log_handler.setFormatter(formatter)
 
-app = FastAPI(title="WhatsApp OTP API Platform")
+logger = logging.getLogger("owltp")
+logger.addHandler(log_handler)
+logger.setLevel(logging.INFO if settings.ENV == "production" else logging.DEBUG)
 
-# CORS
+# Silence noisy loggers
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+# Initialize Rate Limiter with Redis
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=settings.REDIS_URL
+)
+
+app = FastAPI(title=settings.PROJECT_NAME)
+v1_router = APIRouter(prefix="/api/v1")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS Lockdown
+origins = settings.CORS_ORIGINS.split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 🛡️ Phase 8: Active Defense Radar: IP Sentry Middleware
+@app.middleware("http")
+async def ip_sentry_middleware(request: Request, call_next):
+    """
+    Instantly drops requests from IPs placed on the Auto-Ban list.
+    """
+    client_ip = request.client.host if request.client else None
+    if client_ip:
+        r = redis_client.get_redis()
+        if r.exists(f"banned_ip:{client_ip}"):
+            logger.warning(f"SENTRY_BLOCK: Persistent threat blocked: {client_ip}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail="Security Lockdown: Your IP is temporarily banned due to suspicious activity."
+            )
+    
+    response = await call_next(request)
+    return response
+
+# 🔒 V99 Advanced Hardening: Security Headers Middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Prevent Clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    # Prevent Content-Type Sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # XSS Protection for older browsers
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    # Strict Transport Security (HSTS) - 1 year
+    if settings.ENV == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Content Security Policy (Basic)
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+    return response
 
 # Models creation (In production use migrations)
 models.Base.metadata.create_all(bind=database.engine)
@@ -136,6 +203,99 @@ ws = whatsapp_service.WhatsAppService()
 # Global in-memory cache to prevent rapid QR rotation per user
 # Format: {user_id: {"qr": str, "expires_at": float}}
 qr_memory_cache = {}
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+
+@app.on_event("startup")
+def startup_event():
+    """Startup routine to initialize database, run migrations, and resume listeners."""
+    db = next(database.get_db())
+    try:
+        # 1. RUN MIGRATIONS (ENSURE NEW COLUMNS AND TABLES EXIST)
+        print("INFO: Synchronizing database schema for Phase 1 & 2...")
+        db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS api_token_hashed VARCHAR;"))
+        db.execute(text("ALTER TABLE users ALTER COLUMN api_token DROP NOT NULL;"))
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id UUID PRIMARY KEY,
+                user_id UUID REFERENCES users(id),
+                token VARCHAR UNIQUE NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                revoked INTEGER DEFAULT 0
+            );
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS idx_users_api_token_hashed ON users(api_token_hashed);"))
+        db.commit()
+
+        # 2. INITIALIZE ADMIN (EPHEMERAL PASSWORD)
+        admin = db.query(models.User).filter(models.User.email == "admin@owltp.com").first()
+        if not admin:
+            import secrets
+            from auth import get_password_hash
+            raw_password = secrets.token_urlsafe(16)
+            new_admin = models.User(
+                email="admin@owltp.com",
+                password_hash=get_password_hash(raw_password),
+                api_token_hashed=auth.hash_token(auth.generate_secure_token("admin_")),
+                role=models.UserRole.ADMIN.value,
+                plan=models.Plan.ENTERPRISE.value,
+                monthly_quota=0 # unlimited
+            )
+            db.add(new_admin)
+            db.commit()
+            print("\n" + "="*60)
+            print("🚀 SECURITY ALERT: NEW ADMIN CREATED")
+            print(f"Email: admin@owltp.com")
+            print(f"Password: {raw_password}")
+            print("🚨 COPY AND CHANGE THIS PASSWORD IMMEDIATELY!")
+            print("="*60 + "\n")
+        else:
+            print("INFO: Admin user verified successfully.")
+
+        # 3. RESUME LISTENERS
+        print("INFO: Resuming interaction listeners...")
+        active_users = db.query(models.User).filter(
+            (models.User.interaction_strategy == "true") | (models.User.smart_rotation == "true")
+        ).all()
+        
+        for user in active_users:
+            session = db.query(models.WhatsAppSession).filter(
+                models.WhatsAppSession.user_id == user.id,
+                models.WhatsAppSession.status == "connected"
+            ).first()
+            
+            if session:
+                print(f"INFO: Resuming Interaction Listener for user {user.email}")
+                ws.start_listen_daemon(str(user.id), REDIS_URL)
+    except Exception as e:
+        logger.error(f"ERROR during startup initialization: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Cleanup routine to ensure no stale sessions or connections remain."""
+    logger.info("SYSTEM_SHUTDOWN: Commencing graceful shutdown...")
+    
+    # 1. Close Redis Pool
+    try:
+        redis_client.close_redis()
+        logger.info("SHUTDOWN: Redis connection closed.")
+    except Exception as e:
+        logger.error(f"SHUTDOWN_ERROR: Redis close failed: {e}")
+
+    # 2. Close DB Engine
+    try:
+        database.engine.dispose()
+        logger.info("SHUTDOWN: Database engine disposed.")
+    except Exception as e:
+        logger.error(f"SHUTDOWN_ERROR: DB dispose failed: {e}")
+    
+    logger.info("SYSTEM_SHUTDOWN: Offline.")
 
 
 PLAN_DEFAULT_QUOTAS = {
@@ -249,60 +409,45 @@ def get_admin_user(current_user: models.User = Depends(get_current_user)) -> mod
     return current_user
 
 
-@app.on_event("startup")
-def create_admin():
-    db = next(database.get_db())
-    try:
-        # Automatic Migration for existing DBs
-        db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_template VARCHAR DEFAULT 'Your OTP code is: {code}' NOT NULL;"))
-        db.commit()
-    except Exception as e:
-        print(f"INFO: Database migration/check: {e}")
-        db.rollback()
-
-    try:
-        admin = db.query(models.User).filter(models.User.email == "admin@owltp.com").first()
-        if not admin:
-            from auth import get_password_hash
-            new_admin = models.User(
-                email="admin@owltp.com",
-                password_hash=get_password_hash("admin123"),
-                api_token=f"admin-{uuid.uuid4().hex}",
-                role=models.UserRole.ADMIN.value,
-                plan=models.Plan.ENTERPRISE.value,
-                monthly_quota=0 # unlimited
-            )
-            db.add(new_admin)
-            db.commit()
-            print("Admin user created: admin@owltp.com / admin123")
-    finally:
-        db.close()
 
 
-@app.post("/register", response_model=schemas.UserResponse)
-def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+@v1_router.post("/register", response_model=schemas.UserResponse)
+@limiter.limit("3/minute")
+def register(request: Request, user: schemas.UserCreate, db: Session = Depends(database.get_db)):
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     hashed_pass = auth.get_password_hash(user.password)
-    api_token = "ot_" + uuid.uuid4().hex
+    # Generate secure token
+    plaintext_token = auth.generate_secure_token()
+    hashed_token = auth.hash_token(plaintext_token)
 
     new_user = models.User(
         email=user.email,
         password_hash=hashed_pass,
-        api_token=api_token,
+        api_token_hashed=hashed_token,
+        api_token=None, # Never store plaintext if we can avoid it from day 1
         plan=models.Plan.FREE.value,
         monthly_quota=PLAN_DEFAULT_QUOTAS[models.Plan.FREE.value],
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    return new_user
+    
+    # Return plaintext only this once
+    resp = schemas.UserResponse.from_orm(new_user)
+    resp.api_token = plaintext_token
+    
+    # 🔒 V99 Audit Trail
+    log_action(db, "USER_REGISTER", user_id=new_user.id, request=request)
+    
+    return resp
 
 
-@app.post("/auth/login", response_model=schemas.Token)
-def login(payload: schemas.LoginRequest, db: Session = Depends(database.get_db)):
+@v1_router.post("/auth/login", response_model=schemas.Token)
+@limiter.limit("5/minute")
+def login(request: Request, payload: schemas.LoginRequest, db: Session = Depends(database.get_db)):
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user or not auth.verify_password(payload.password, user.password_hash):
         raise HTTPException(
@@ -311,21 +456,41 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(database.get_db))
         )
 
     access_token = auth.create_access_token({"sub": str(user.id)})
-    return schemas.Token(access_token=access_token)
+    
+    # 🔒 V99 Audit Trail
+    log_action(db, "AUTH_LOGIN_SUCCESS", user_id=user.id, request=request)
+    
+    # Generate Refresh Token
+    import secrets
+    rf_token = secrets.token_urlsafe(32)
+    new_rf = models.RefreshToken(
+        user_id=user.id,
+        token=rf_token,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7)
+    )
+    db.add(new_rf)
+    db.commit()
+
+    return schemas.Token(access_token=access_token, refresh_token=rf_token)
 
 
-@app.get("/me", response_model=schemas.UserResponse)
+@v1_router.get("/me", response_model=schemas.UserResponse)
 def read_me(current_user: models.User = Depends(get_current_user)):
     ensure_billing_period(current_user)
-    print(f"DEBUG: Returning info for {current_user.email}, Role: {current_user.role}")
     return current_user
 
 
-@app.get("/api/keys", response_model=schemas.APIKeyResponse)
+@v1_router.get("/keys", response_model=schemas.APIKeyResponse)
 def get_api_key(current_user: models.User = Depends(get_current_user)):
     ensure_billing_period(current_user)
+    
+    # Attempt to decrypt the token for "Show" functionality
+    plaintext_token = auth.decrypt_token(current_user.api_token)
+    is_masked = not plaintext_token # If decryption fails, it's a legacy hashed token
+    
     return schemas.APIKeyResponse(
-        api_token=current_user.api_token,
+        api_token=plaintext_token or "••••••••••••••••",
+        is_token_masked=is_masked,
         plan=current_user.plan,
         monthly_quota=current_user.monthly_quota,
         messages_sent_month=current_user.messages_sent_month,
@@ -334,42 +499,49 @@ def get_api_key(current_user: models.User = Depends(get_current_user)):
     )
 
 
-@app.post("/api/settings", response_model=schemas.UserResponse)
+@v1_router.post("/settings", response_model=schemas.UserResponse)
 def update_settings(
     settings: schemas.UserSettingsUpdate,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
 ):
-    current_user.otp_template = settings.otp_template
-    if settings.greeting_text is not None:
-        current_user.greeting_text = settings.greeting_text
-    if settings.notify_on_fail is not None:
-        current_user.notify_on_fail = settings.notify_on_fail
-    if settings.notify_email is not None:
-        current_user.notify_email = settings.notify_email
+    # Use Pydantic's dict(exclude_unset=True) for safe partial updates
+    # AND filter out None values to prevent overwriting with NULL if non-nullable
+    update_data = settings.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        if value is not None and hasattr(current_user, field):
+            setattr(current_user, field, value)
+
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
     return current_user
 
 
-@app.post("/api/settings/password")
+@v1_router.post("/settings/password")
 def change_password(
+    request: Request,
     payload: schemas.ChangePasswordRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
 ):
     if not auth.verify_password(payload.current_password, current_user.password_hash):
+        log_action(db, "PASSWORD_CHANGE_FAIL", user_id=current_user.id, request=request)
         raise HTTPException(status_code=400, detail="كلمة المرور الحالية غير صحيحة")
     if len(payload.new_password) < 6:
         raise HTTPException(status_code=400, detail="كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل")
-    current_user.password_hash = auth.hash_password(payload.new_password)
+    
+    current_user.password_hash = auth.get_password_hash(payload.new_password)
     db.add(current_user)
     db.commit()
+    
+    # 🔒 V99 Audit Trail
+    log_action(db, "PASSWORD_CHANGE_SUCCESS", user_id=current_user.id, request=request)
+    
     return {"success": True, "message": "تم تغيير كلمة المرور بنجاح"}
 
 
-@app.post("/api/settings/notifications", response_model=schemas.UserResponse)
+@v1_router.post("/settings/notifications", response_model=schemas.UserResponse)
 def update_notifications(
     payload: schemas.NotificationSettingsUpdate,
     current_user: models.User = Depends(get_current_user),
@@ -384,49 +556,89 @@ def update_notifications(
     return current_user
 
 
-@app.post("/api/keys/regenerate", response_model=schemas.APIKeyResponse)
+@v1_router.post("/keys/regenerate", response_model=schemas.APIKeyResponse)
 def regenerate_api_key(
+    request: Request,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
 ):
-    current_user.api_token = "ot_" + uuid.uuid4().hex
+    plaintext_token = auth.generate_secure_token()
+    # 🔒 Dual Storage: Encrypted for dashboard display, Hashed for performance/fast lookup
+    current_user.api_token_hashed = auth.hash_token(plaintext_token)
+    current_user.api_token = auth.encrypt_token(plaintext_token)
+    
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
     ensure_billing_period(current_user)
+    
+    # 🔒 V99 Audit Trail
+    log_action(db, "API_TOKEN_REGENERATE", user_id=current_user.id, request=request)
+    
     return schemas.APIKeyResponse(
-        api_token=current_user.api_token,
+        api_token=plaintext_token,
+        is_token_masked=False,
         plan=current_user.plan,
         monthly_quota=current_user.monthly_quota,
         messages_sent_month=current_user.messages_sent_month,
         otp_template=current_user.otp_template,
+        greeting_text=current_user.greeting_text or "مرحبا",
     )
 
 
-@app.post("/api/send", response_model=schemas.SendOTPResponse)
+@v1_router.post("/send", response_model=schemas.SendOTPResponse)
+@limiter.limit("30/minute")
 def send_otp(
+    request: Request,
     payload: schemas.SendOTPRequest,
     authorization: str = Security(api_key_header),
     db: Session = Depends(database.get_db),
 ):
     # API token authentication
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid API Token")
+        raise HTTPException(status_code=403, detail="Invalid API Token format")
 
     token = authorization.split(" ")[1]
-    user = db.query(models.User).filter(models.User.api_token == token).first()
+    hashed_token = auth.hash_token(token)
+    
+    # 1. PRIMARY: Check hashed token
+    user = db.query(models.User).filter(models.User.api_token_hashed == hashed_token).first()
+    
+    # 2. FALLBACK: Check plaintext (Migration)
+    if not user:
+        user = db.query(models.User).filter(models.User.api_token == token).first()
+        if user:
+            # AUTO-MIGRATE: Hash it now and wipe plaintext
+            print(f"INFO: Migrating API token for user {user.email} to SHA-256 hash.")
+            user.api_token_hashed = hashed_token
+            user.api_token = None
+            db.add(user)
+            db.commit()
+            db.refresh(user)
 
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid API Token")
+        raise HTTPException(status_code=403, detail="Invalid API Token")
 
-    # Enforce per-token rate limit: 30 messages / minute
+    # 1. Build final message template for the worker:
+    # {greeting} {name}\n{otp_template}
+    greeting = user.greeting_text or "Hello"
+    template = user.otp_template or "Your verification code is: {code}"
+    
+    # Combined template for the worker
+    combined_template = f"{greeting} {{name}}\n{template}"
+    
+    # Logged message (snapshot for the dashboard)
+    log_name = payload.name if payload.name else "User"
+    final_message = combined_template.replace("{name}", log_name).replace("{code}", payload.code)
+
+    # 2. Rate Limiting
     if not redis_client.check_rate_limit(token, limit_per_minute=30):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded: 30 messages per minute",
         )
 
-    # Enforce plan monthly quota
+    # 3. Quota Check
     ensure_billing_period(user)
     if user.plan != models.Plan.ENTERPRISE.value and user.messages_sent_month >= user.monthly_quota:
         raise HTTPException(
@@ -434,7 +646,7 @@ def send_otp(
             detail="Monthly message quota exceeded for your plan",
         )
 
-    # Prevent parallel send conflicts with a simple Redis lock per user
+    # 4. Parallel Send Lock
     r = redis_client.get_redis()
     lock_key = f"sendlock:{user.id}"
     if not r.set(lock_key, "1", nx=True, ex=30):
@@ -443,65 +655,54 @@ def send_otp(
             detail="Another send operation is in progress for this account",
         )
 
-    # Validate code is numeric
+    # 5. Validation
     if not payload.code.isdigit():
+        r.delete(lock_key)
         raise HTTPException(status_code=400, detail="OTP code must contain digits only")
 
-    # Build final message:
-    # {greeting} {name}\n{otp_template}\n{code}
-    greeting = user.greeting_text or "مرحبا"
-    template = user.otp_template or "كود التحقق الخاص بك هو: "
-
-    if payload.name:
-        final_message = f"{greeting} {payload.name}\n{template}\n{payload.code}"
-    else:
-        final_message = f"{template}\n{payload.code}"
-
-    try:
-        # Pick best session using round-robin
-        chosen_session = _pick_session_round_robin(db, user, r)
-        session_suffix = ""
-        # Determine the suffix from session_path to pass correct user_id to CLI
-        all_sessions = _get_all_sessions(db, user)
-        si = all_sessions.index(chosen_session) if chosen_session in all_sessions else 0
-        cli_user_id = str(user.id) + (f"_{si}" if si > 0 else "")
-        result = ws.send_message(cli_user_id, payload.phone, final_message)
-    finally:
-        r.delete(lock_key)
-
-    # Log message
-    msg_status = "sent" if result.get("success") else "failed"
+    # 6. LOG MESSAGE (QUEUED)
     new_msg = models.Message(
         user_id=user.id,
         phone=payload.phone,
         message=final_message,
-        status=msg_status,
+        status="queued",
     )
-    user.messages_sent_month = (user.messages_sent_month or 0) + 1 if msg_status == "sent" else user.messages_sent_month
-
     db.add(new_msg)
-    db.add(user)
     db.commit()
     db.refresh(new_msg)
 
-    # Send fail notification if enabled
-    if msg_status == "failed" and user.notify_on_fail == "true" and user.notify_email:
-        try:
-            _send_fail_notification_if_configured(db, user.notify_email, payload.phone, result.get("error"))
-        except Exception:
-            pass  # Never block the response due to notification failure
+    try:
+        # 7. Pick session
+        chosen_session = _pick_session_round_robin(db, user, r)
+        all_sessions = _get_all_sessions(db, user)
+        si = all_sessions.index(chosen_session) if chosen_session in all_sessions else 0
+        cli_user_id = str(user.id) + (f"_{si}" if si > 0 else "")
 
-    if not result.get("success"):
-        return schemas.SendOTPResponse(
-            success=False,
-            status="failed",
-            error=result.get("error"),
+        # 8. EXECUTING SEND (ASYNC)
+        send_otp_message.delay(
+            cli_user_id, 
+            payload.phone, 
+            combined_template, 
+            code=payload.code, 
+            name=payload.name,
+            message_id=str(new_msg.id)
         )
+        
+        # Increment usage
+        user.messages_sent_month = (user.messages_sent_month or 0) + 1
+        db.add(user)
+        db.commit()
+    finally:
+        r.delete(lock_key)
 
-    return schemas.SendOTPResponse(success=True, status="sent", message_id=str(new_msg.id))
+    return schemas.SendOTPResponse(
+        success=True, 
+        status="queued", 
+        message_id=str(new_msg.id)
+    )
 
 
-@app.get("/api/logs", response_model=schemas.PaginatedMessagesResponse)
+@v1_router.get("/logs", response_model=schemas.PaginatedMessagesResponse)
 def list_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -636,7 +837,7 @@ def _sync_session_status(db: Session, session: models.WhatsAppSession, user: mod
                 db.commit()
                 db.commit()
 
-@app.get("/api/whatsapp/status", response_model=schemas.WhatsAppStatusResponse)
+@v1_router.get("/whatsapp/status", response_model=schemas.WhatsAppStatusResponse)
 def whatsapp_status(
     session_index: int = Query(0),
     current_user: models.User = Depends(get_current_user),
@@ -656,7 +857,7 @@ def whatsapp_status(
     )
 
 
-@app.get("/api/whatsapp/qr", response_model=schemas.WhatsAppQRResponse)
+@v1_router.get("/whatsapp/qr", response_model=schemas.WhatsAppQRResponse)
 def get_qr(
     force: bool = Query(False),
     session_index: int = Query(0),
@@ -693,7 +894,7 @@ def get_qr(
     )
 
 
-@app.post("/api/whatsapp/reset")
+@v1_router.post("/whatsapp/reset")
 def reset_whatsapp(
     session_index: int = Query(0),
     current_user: models.User = Depends(get_current_user),
@@ -714,7 +915,7 @@ def reset_whatsapp(
     return {"success": True, "message": "Authentication reset. You can now try again."}
 
 
-@app.get("/api/whatsapp/sessions", response_model=List[schemas.WhatsAppStatusResponse])
+@v1_router.get("/whatsapp/sessions", response_model=List[schemas.WhatsAppStatusResponse])
 def get_all_user_sessions(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
@@ -742,7 +943,7 @@ def get_all_user_sessions(
     ]
 
 
-@app.post("/api/whatsapp/sessions/add")
+@v1_router.post("/whatsapp/sessions/add")
 def add_whatsapp_session(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
@@ -767,7 +968,7 @@ def add_whatsapp_session(
     }
 
 
-@app.delete("/api/whatsapp/sessions/{session_index}")
+@v1_router.delete("/whatsapp/sessions/{session_index}")
 def delete_whatsapp_session(
     session_index: int,
     current_user: models.User = Depends(get_current_user),
@@ -790,7 +991,7 @@ def delete_whatsapp_session(
 
 
 
-@app.get("/api/stats", response_model=schemas.DashboardStats)
+@v1_router.get("/stats", response_model=schemas.DashboardStats)
 def get_dashboard_stats(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db),
@@ -850,7 +1051,7 @@ def get_dashboard_stats(
     )
 
 
-@app.post("/api/user/upgrade", response_model=schemas.UserResponse)
+@v1_router.post("/user/upgrade", response_model=schemas.UserResponse)
 def upgrade_user_plan(
     plan_name: str = Query(...),
     current_user: models.User = Depends(get_current_user),
@@ -870,7 +1071,7 @@ def upgrade_user_plan(
     return current_user
 
 
-@app.get("/api/admin/users", response_model=List[schemas.UserResponse])
+@v1_router.get("/admin/users", response_model=List[schemas.UserResponse])
 def admin_get_users(
     admin: models.User = Depends(get_admin_user),
     db: Session = Depends(database.get_db)
@@ -878,7 +1079,7 @@ def admin_get_users(
     return db.query(models.User).all()
 
 
-@app.get("/api/admin/users/{user_id}", response_model=schemas.UserDetailedResponse)
+@v1_router.get("/admin/users/{user_id}", response_model=schemas.UserDetailedResponse)
 def admin_get_user_details(
     user_id: uuid.UUID,
     admin: models.User = Depends(get_admin_user),
@@ -901,7 +1102,7 @@ def admin_get_user_details(
     return user_data
 
 
-@app.patch("/api/admin/users/{user_id}", response_model=schemas.UserResponse)
+@v1_router.patch("/admin/users/{user_id}", response_model=schemas.UserResponse)
 def admin_update_user(
     user_id: uuid.UUID,
     update_data: schemas.UserAdminUpdate,
@@ -929,13 +1130,13 @@ def admin_update_user(
     return user
 
 
-@app.get("/api/plans", response_model=List[schemas.SubscriptionPlanResponse])
+@v1_router.get("/plans", response_model=List[schemas.SubscriptionPlanResponse])
 def get_plans(db: Session = Depends(database.get_db)):
     """Publicly accessible endpoint to get all subscription plans."""
     return db.query(models.SubscriptionPlan).order_by(models.SubscriptionPlan.created_at).all()
 
 
-@app.post("/api/admin/plans", response_model=schemas.SubscriptionPlanResponse)
+@v1_router.post("/admin/plans", response_model=schemas.SubscriptionPlanResponse)
 def admin_create_plan(
     plan: schemas.SubscriptionPlanCreate,
     admin: models.User = Depends(get_admin_user),
@@ -955,7 +1156,7 @@ def admin_create_plan(
     return db_plan
 
 
-@app.patch("/api/admin/plans/{plan_id}", response_model=schemas.SubscriptionPlanResponse)
+@v1_router.patch("/admin/plans/{plan_id}", response_model=schemas.SubscriptionPlanResponse)
 def admin_update_plan(
     plan_id: uuid.UUID,
     update_data: schemas.SubscriptionPlanUpdate,
@@ -978,7 +1179,7 @@ def admin_update_plan(
     return db_plan
 
 
-@app.delete("/api/admin/plans/{plan_id}")
+@v1_router.delete("/admin/plans/{plan_id}")
 def admin_delete_plan(
     plan_id: uuid.UUID,
     admin: models.User = Depends(get_admin_user),
@@ -994,7 +1195,7 @@ def admin_delete_plan(
 
 # --- Translation Endpoints ---
 
-@app.get("/api/translations/{lang}")
+@v1_router.get("/translations/{lang}")
 def get_translations_by_lang(lang: str, db: Session = Depends(database.get_db)):
     """Public endpoint to get translations for a specific language."""
     translations = db.query(models.Translation).all()
@@ -1009,7 +1210,7 @@ def get_translations_by_lang(lang: str, db: Session = Depends(database.get_db)):
     return result
 
 
-@app.get("/api/admin/translations", response_model=List[schemas.TranslationResponse])
+@v1_router.get("/admin/translations", response_model=List[schemas.TranslationResponse])
 def get_all_translations_admin(
     db: Session = Depends(database.get_db),
     admin: models.User = Depends(get_admin_user)
@@ -1018,7 +1219,7 @@ def get_all_translations_admin(
     return db.query(models.Translation).all()
 
 
-@app.post("/api/admin/translations", response_model=schemas.TranslationResponse)
+@v1_router.post("/admin/translations", response_model=schemas.TranslationResponse)
 def upsert_translation(
     translation: schemas.TranslationCreate,
     db: Session = Depends(database.get_db),
@@ -1038,7 +1239,7 @@ def upsert_translation(
     return db_t
 
 
-@app.delete("/api/admin/translations/{translation_id}")
+@v1_router.delete("/admin/translations/{translation_id}")
 def delete_translation(
     translation_id: uuid.UUID,
     db: Session = Depends(database.get_db),
@@ -1055,7 +1256,7 @@ def delete_translation(
 
 # --- Admin WhatsApp Data Access ---
 
-@app.get("/api/admin/whatsapp/users/{user_id}/profile")
+@v1_router.get("/admin/whatsapp/users/{user_id}/profile")
 def admin_get_whatsapp_profile(
     user_id: uuid.UUID,
     admin: models.User = Depends(get_admin_user),
@@ -1066,7 +1267,7 @@ def admin_get_whatsapp_profile(
         raise HTTPException(status_code=400, detail=result.get("error", "Failed to fetch profile"))
     return result
 
-@app.get("/api/admin/whatsapp/users/{user_id}/chats")
+@v1_router.get("/admin/whatsapp/users/{user_id}/chats")
 def admin_get_whatsapp_chats(
     user_id: uuid.UUID,
     limit: int = Query(50),
@@ -1077,7 +1278,7 @@ def admin_get_whatsapp_chats(
     result = ws.get_chats(str(user_id), limit, page)
     return result
 
-@app.get("/api/admin/whatsapp/users/{user_id}/contacts")
+@v1_router.get("/admin/whatsapp/users/{user_id}/contacts")
 def admin_get_whatsapp_contacts(
     user_id: uuid.UUID,
     query: str = Query(""),
@@ -1087,7 +1288,7 @@ def admin_get_whatsapp_contacts(
     result = ws.get_contacts(str(user_id), query)
     return result
 
-@app.post("/api/admin/whatsapp/users/{user_id}/sync")
+@v1_router.post("/admin/whatsapp/users/{user_id}/sync")
 def admin_sync_whatsapp(
     user_id: uuid.UUID,
     admin: models.User = Depends(get_admin_user),
@@ -1098,7 +1299,7 @@ def admin_sync_whatsapp(
         raise HTTPException(status_code=400, detail=result.get("error", "Failed to start sync"))
     return result
 
-@app.get("/api/admin/whatsapp/users/{user_id}/messages")
+@v1_router.get("/admin/whatsapp/users/{user_id}/messages")
 def admin_get_whatsapp_messages(
     user_id: uuid.UUID,
     chat_jid: str = Query(...),
@@ -1113,7 +1314,7 @@ def admin_get_whatsapp_messages(
 
 # --- Admin SMTP Settings ---
 
-@app.get("/admin/smtp", response_model=schemas.SmtpSettings)
+@v1_router.get("/admin/smtp", response_model=schemas.SmtpSettings)
 def admin_get_smtp(
     admin: models.User = Depends(get_admin_user),
     db: Session = Depends(database.get_db),
@@ -1129,7 +1330,7 @@ def admin_get_smtp(
     )
 
 
-@app.post("/admin/smtp", response_model=schemas.SmtpSettings)
+@v1_router.post("/admin/smtp", response_model=schemas.SmtpSettings)
 def admin_update_smtp(
     payload: schemas.SmtpSettings,
     admin: models.User = Depends(get_admin_user),
@@ -1156,7 +1357,7 @@ def admin_update_smtp(
     return admin_get_smtp(admin=admin, db=db)
 
 
-@app.post("/admin/smtp/test")
+@v1_router.post("/admin/smtp/test")
 def admin_test_smtp(
     payload: schemas.SmtpSettings,
     admin: models.User = Depends(get_admin_user),
@@ -1176,6 +1377,123 @@ def admin_test_smtp(
         return {"success": True, "message": f"تم إرسال رسالة اختبار إلى {admin.email}"}
     raise HTTPException(status_code=502, detail="فشل إرسال رسالة الاختبار — تحقق من إعدادات SMTP")
 
+
+@v1_router.get("/stats")
+def get_dashboard_stats(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    """
+    Unified dashboard metrics: Message counts, success rates, and combined activity feed.
+    """
+    ensure_billing_period(current_user)
+    
+    # 1. Message Metrics
+    total = db.query(models.Message).filter(models.Message.user_id == current_user.id).count()
+    sent = db.query(models.Message).filter(models.Message.user_id == current_user.id, models.Message.status == "sent").count()
+    success_rate = round((sent / total * 100), 1) if total > 0 else 0
+    
+    # 2. Active Sessions
+    active_sessions = db.query(models.WhatsAppSession).filter(
+        models.WhatsAppSession.user_id == current_user.id,
+        models.WhatsAppSession.status == "connected"
+    ).count()
+    
+    # 3. Combined Activity Feed (OTPs + Sensitve Audit Logs)
+    total = db.query(models.Message).filter(models.Message.user_id == current_user.id).count()
+    
+    # Recent OTPs (Last 5)
+    recent_otps = (
+        db.query(models.Message)
+        .filter(models.Message.user_id == current_user.id)
+        .order_by(models.Message.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    
+    recent_audit = (
+        db.query(models.AuditLog)
+        .filter(models.AuditLog.user_id == current_user.id)
+        .order_by(models.AuditLog.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    
+    # Merge and Sort
+    combined_activity = []
+    for msg in recent_otps:
+        combined_activity.append({
+            "id": f"otp_{msg.id}",
+            "phone": msg.phone,
+            "status": msg.status,
+            "created_at": msg.created_at
+        })
+    
+    # 4. Usage Display
+    quota_str = "∞" if current_user.monthly_quota == 0 else str(current_user.monthly_quota)
+    usage_text = f"{current_user.messages_sent_month} / {quota_str}"
+    
+    # 5. Last 7 Days (Daily Traffic)
+    daily_stats = []
+    for i in range(6, -1, -1):
+        day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+        count = db.query(models.Message).filter(
+            models.Message.user_id == current_user.id,
+            models.Message.created_at >= (datetime.now(timezone.utc) - timedelta(days=i+1)),
+            models.Message.created_at < (datetime.now(timezone.utc) - timedelta(days=i))
+        ).count()
+        daily_stats.append({"date": day, "count": count})
+
+    return {
+        "total_messages": total,
+        "success_rate": success_rate,
+        "active_sessions": active_sessions,
+        "monthly_usage": usage_text,
+        "plan": current_user.plan,
+        "recent_activity": combined_activity, # Frontend expects RecentActivity[]
+        "recent_audit": recent_audit,
+        "daily_stats": daily_stats
+    }
+
+
+@v1_router.get("/admin/security/stats")
+def get_security_stats(
+    admin: models.User = Depends(get_admin_user),
+    db: Session = Depends(database.get_db),
+):
+    """
+    Returns a live feed of active bans and recent threat events.
+    """
+    r = redis_client.get_redis()
+    
+    # 1. Fetch currently banned IPs
+    banned_keys = r.keys("banned_ip:*")
+    banned_ips = []
+    for key in banned_keys:
+        ip = key.decode().split(":")[1]
+        ttl = r.ttl(key)
+        banned_ips.append({"ip": ip, "ttl": ttl})
+
+    # 2. Fetch recent failed audit logs
+    threat_logs = (
+        db.query(models.AuditLog)
+        .filter(models.AuditLog.action.like("%_FAIL%"))
+        .order_by(models.AuditLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    
+    return {
+        "banned_ips": banned_ips,
+        "recent_threats": threat_logs,
+        "threshold": settings.THREAT_THRESHOLD
+    }
+
+# 🏁 V99 API Versioning: Mount Router
+app.include_router(v1_router)
+
+# ⚠️ V99 Legacy Compatibility Layer
+app.post("/api/send", response_model=schemas.SendOTPResponse)(send_otp)
 
 @app.get("/")
 def root():

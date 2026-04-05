@@ -26,7 +26,7 @@ services:
     container_name: whatsapp_otp_backend
     restart: always
     ports:
-      - "8000:8000"
+      - "8080:8000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password123}@db:5432/${POSTGRES_DB:-whatsapp_otp}
       REDIS_URL: redis://redis:6379/0
@@ -44,10 +44,12 @@ services:
     build:
       context: ./frontend
       dockerfile: ../docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
     container_name: whatsapp_otp_frontend
     restart: always
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_URL: http://localhost:8080
     ports:
       - "3000:3000"
     networks:

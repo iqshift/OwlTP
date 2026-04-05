@@ -26,7 +26,7 @@ export default function LandingPage() {
   useEffect(() => {
     const fetchPlans = async () => {
       try {
-        const response = await api.get("/api/plans");
+        const response = await api.get("/plans");
         setPlans(response.data);
       } catch (err) {
         console.error("Failed to fetch plans:", err);

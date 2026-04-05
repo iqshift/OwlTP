@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2, Wifi, WifiOff, RefreshCw } from "lucide-react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
+import { useTranslation } from "@/hooks/useTranslation";
 
 type SessionStatus = {
   status: string;
@@ -38,10 +39,12 @@ export default function ConnectPage() {
   const planName = (user as any)?.plan || "free";
   const maxSessions = PLAN_SESSION_LIMITS[planName] ?? 1;
 
+  const { t } = useTranslation();
+
   // Load all sessions
   const fetchSessions = async () => {
     try {
-      const res = await api.get<SessionStatus[]>("/api/whatsapp/sessions");
+      const res = await api.get<SessionStatus[]>("/whatsapp/sessions");
       setSessions(res.data || []);
     } catch {
       setSessions([]);
@@ -52,12 +55,12 @@ export default function ConnectPage() {
   const fetchQR = async (index: number = activeIndex, force: boolean = false) => {
     setQrLoading(true);
     try {
-      const res = await api.get<QRResponse>(`/api/whatsapp/qr?session_index=${index}${force ? "&force=true" : ""}`);
+      const res = await api.get<QRResponse>(`/whatsapp/qr?session_index=${index}${force ? "&force=true" : ""}`);
       setQrStatus(res.data.status);
       setQrCode(res.data.qr || null);
       setError(null);
     } catch (err: any) {
-      setError("Failed to load QR code");
+      setError(t('error_loading_qr', "Failed to load QR code"));
     } finally {
       setQrLoading(false);
       setLoading(false);
@@ -96,13 +99,13 @@ export default function ConnectPage() {
   }, [activeIndex]);
 
   const handleReset = async () => {
-    if (!confirm("إعادة تعيين الاتصال الحالي؟")) return;
+    if (!confirm(t('confirm_reset', "Reset current connection?"))) return;
     setLoading(true);
     try {
-      await api.post("/api/whatsapp/reset");
+      await api.post("/whatsapp/reset");
       window.location.reload();
     } catch {
-      alert("فشل إعادة التعيين");
+      alert(t('reset_failed', "Reset failed"));
     } finally {
       setLoading(false);
     }
@@ -111,8 +114,8 @@ export default function ConnectPage() {
   const handleAddSession = async () => {
     setAddMsg(null);
     try {
-      const res = await api.post("/api/whatsapp/sessions/add");
-      setAddMsg((res.data as any).message || "تم إنشاء الجلسة");
+      const res = await api.post("/whatsapp/sessions/add");
+      setAddMsg((res.data as any).message || t('session_created', "Session created"));
       // get the real new index from API response
       const newIndex: number = (res.data as any).session_index ?? 1;
       await fetchSessions();
@@ -120,18 +123,18 @@ export default function ConnectPage() {
       // force start CLI for new session to get QR
       await fetchQR(newIndex, true);
     } catch (err: any) {
-      setAddMsg(err?.response?.data?.detail || "فشل إنشاء الجلسة");
+      setAddMsg(err?.response?.data?.detail || t('session_failed', "Failed to create session"));
     }
   };
 
   const handleDeleteSession = async (index: number) => {
-    if (!confirm(`حذف الجلسة ${index + 1}؟`)) return;
+    if (!confirm(t('confirm_delete', `Delete session ${index + 1}?`))) return;
     try {
-      await api.delete(`/api/whatsapp/sessions/${index}`);
+      await api.delete(`/whatsapp/sessions/${index}`);
       await fetchSessions();
       if (activeIndex >= index) setActiveIndex(Math.max(0, index - 1));
     } catch (err: any) {
-      alert(err?.response?.data?.detail || "فشل حذف الجلسة");
+      alert(err?.response?.data?.detail || t('delete_failed', "Failed to delete session"));
     }
   };
 
@@ -144,9 +147,9 @@ export default function ConnectPage() {
   };
 
   const statusLabel = (s: string) => {
-    if (s === "connected") return "متصل";
-    if (s === "qr_ready") return "بانتظار المسح";
-    return "غير متصل";
+    if (s === "connected") return t('connected', "Connected");
+    if (s === "qr_ready") return t('awaiting_scan', "Waiting for scan");
+    return t('disconnected', "Disconnected");
   };
 
   return (
@@ -161,8 +164,8 @@ export default function ConnectPage() {
       <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-5">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-sm font-semibold text-white">الجلسات النشطة</h2>
-            <p className="text-xs text-slate-500">{sessions.length} / {maxSessions} جلسة — خطة {planName.toUpperCase()}</p>
+            <h2 className="text-sm font-semibold text-white">{t('active_sessions', "Active Sessions")}</h2>
+            <p className="text-xs text-slate-500">{sessions.length} / {maxSessions} {t('sessions_limit', "sessions")} — {t('plan', "Plan")} {planName.toUpperCase()}</p>
           </div>
           {sessions.length < maxSessions ? (
             <button
@@ -170,17 +173,17 @@ export default function ConnectPage() {
               className="flex items-center gap-2 bg-green-500 hover:bg-green-400 text-slate-950 px-4 py-2 rounded-xl text-sm font-bold transition-all active:scale-95 shadow shadow-green-500/20"
             >
               <Plus size={16} />
-              إضافة جلسة
+              {t('add_session', "Add Session")}
             </button>
           ) : (
             <span className="text-xs text-slate-500 border border-slate-700 rounded-lg px-3 py-1.5">
-              الحد الأقصى للخطة الحالية
+              {t('max_plan_limit', "Plan limit reached")}
             </span>
           )}
         </div>
 
         {addMsg && (
-          <div className={`mb-3 text-sm px-3 py-2 rounded-lg border ${addMsg.includes("تم") ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-red-500/10 text-red-400 border-red-500/20"}`}>
+          <div className={`mb-3 text-sm px-3 py-2 rounded-lg border ${addMsg.includes("created") ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-red-500/10 text-red-400 border-red-500/20"}`}>
             {addMsg}
           </div>
         )}
@@ -191,7 +194,7 @@ export default function ConnectPage() {
             <div key={i} className={`flex items-center gap-2 px-3 py-2 rounded-xl border cursor-pointer transition-all ${activeIndex === i ? "border-green-500/50 bg-green-500/10" : "border-slate-700 bg-slate-950 hover:border-slate-600"}`}
               onClick={() => setActiveIndex(i)}>
               <span className={`w-2 h-2 rounded-full ${s.status === "connected" ? "bg-green-500" : s.status === "qr_ready" ? "bg-yellow-500" : "bg-red-500"}`} />
-              <span className="text-sm font-medium text-white">جلسة {i + 1}</span>
+              <span className="text-sm font-medium text-white">{t('session', "Session")} {i + 1}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full border ${statusColor(s.status)}`}>
                 {statusLabel(s.status)}
               </span>
@@ -204,7 +207,7 @@ export default function ConnectPage() {
             </div>
           ))}
           {sessions.length === 0 && (
-            <div className="text-slate-500 text-sm">لا توجد جلسات بعد</div>
+            <div className="text-slate-500 text-sm">{t('no_sessions', "No sessions yet")}</div>
           )}
         </div>
       </div>
@@ -212,16 +215,16 @@ export default function ConnectPage() {
       {/* QR Section */}
       <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-white">جلسة {activeIndex + 1}</h2>
+          <h2 className="text-sm font-semibold text-white">{t('session', "Session")} {activeIndex + 1}</h2>
           <div className="flex gap-2">
             <button onClick={() => fetchQR(activeIndex)}
               className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 px-3 py-1.5 rounded-lg transition-all">
               <RefreshCw size={12} />
-              تحديث
+              {t('refresh', "Refresh")}
             </button>
             <button onClick={handleReset}
               className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-500/20 hover:border-red-500/40 px-3 py-1.5 rounded-lg transition-all">
-              إعادة تعيين
+              {t('reset', "Reset")}
             </button>
           </div>
         </div>
@@ -230,12 +233,12 @@ export default function ConnectPage() {
           {/* QR Box */}
           <div className="w-64 h-64 rounded-2xl flex items-center justify-center border border-slate-700 bg-slate-950 overflow-hidden">
             {qrLoading || loading ? (
-              <div className="text-slate-500 text-sm animate-pulse">جارٍ التحميل...</div>
+              <div className="text-slate-500 text-sm animate-pulse">{t('loading', "Loading...")}</div>
             ) : isConnected ? (
               <div className="text-center space-y-2">
                 <Wifi size={40} className="text-green-400 mx-auto" />
-                <p className="text-green-400 font-bold">متصل</p>
-                <p className="text-slate-400 text-xs">جلسة {activeIndex + 1} تعمل بنجاح</p>
+                <p className="text-green-400 font-bold">{t('connected', "Connected")}</p>
+                <p className="text-slate-400 text-xs">{t('session', "Session")} {activeIndex + 1} {t('working_success', "is active")}</p>
               </div>
             ) : error ? (
               <div className="text-center text-red-400 text-sm px-4">{error}</div>
@@ -248,7 +251,7 @@ export default function ConnectPage() {
             ) : (
               <div className="text-center space-y-2">
                 <WifiOff size={32} className="text-slate-500 mx-auto" />
-                <p className="text-slate-500 text-sm">اضغط تحديث للحصول على QR</p>
+                <p className="text-slate-500 text-sm">{t('click_refresh_qr', "Click refresh to get QR")}</p>
               </div>
             )}
           </div>
@@ -256,12 +259,12 @@ export default function ConnectPage() {
           {/* How to link */}
           {!isConnected && (
             <div className="text-center space-y-2 text-sm text-slate-400">
-              <p className="font-semibold text-white">How to link:</p>
+              <p className="font-semibold text-white">{t('how_to_link', "How to link:")}</p>
               <ol className="text-start space-y-1.5 list-decimal list-inside">
-                <li>Open WhatsApp on your mobile phone.</li>
-                <li>Tap Menu (⋮) or Settings (⚙) and select <strong>Linked Devices</strong>.</li>
-                <li>Tap on <strong>Link a Device</strong>.</li>
-                <li>Point your phone to this screen to capture the code.</li>
+                <li>{t('link_step_1', "Open WhatsApp on your mobile phone.")}</li>
+                <li>{t('link_step_2', "Tap Menu (⋮) or Settings (⚙) and select")} <strong>{t('linked_devices', "Linked Devices")}</strong>.</li>
+                <li>{t('link_step_3', "Tap on")} <strong>{t('link_a_device', "Link a Device")}</strong>.</li>
+                <li>{t('link_step_4', "Point your phone to this screen to capture the code.")}</li>
               </ol>
             </div>
           )}
