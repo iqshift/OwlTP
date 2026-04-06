@@ -1,0 +1,253 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/vicentereig/whatsapp-cli/internal/commands"
+)
+
+var (
+	// version is overridden at build time via -ldflags "-X main.version=X.Y.Z"
+	version = "1.3.1"
+)
+
+const usage = `WhatsApp CLI - Command line interface for WhatsApp
+
+Usage:
+  whatsapp-cli <command> [options]
+
+Commands:
+  auth                              Authenticate with WhatsApp (scan QR code)
+  sync                              Sync messages continuously (run until Ctrl+C)
+  messages list [--chat JID]        List messages
+  messages search --query TEXT      Search messages
+  contacts search --query TEXT      Search contacts
+  chats list                        List chats
+  send --to RECIPIENT --message TEXT    Send a message
+  listen --redis-url URL --user-id ID    Listen for incoming messages and push to Redis
+  version                           Print CLI version information
+
+Global Options:
+  --store DIR    Storage directory (default: ./store)
+
+Examples:
+  whatsapp-cli auth
+  whatsapp-cli sync                    # Keep running to sync messages
+  whatsapp-cli messages list --chat 1234567890@s.whatsapp.net --limit 20
+  whatsapp-cli messages search --query "meeting"
+  whatsapp-cli contacts search --query "John"
+  whatsapp-cli send --to 1234567890 --message "Hello"
+  whatsapp-cli presence --to 1234567890 --type typing
+  whatsapp-cli send --to 1234567890@g.us --message "Hello group"
+`
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	// Global flags
+	storeDir := flag.String("store", "./store", "storage directory")
+	flag.Parse()
+
+	// Get command
+	args := flag.Args()
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	command := args[0]
+	subcommand := ""
+	if len(args) > 1 {
+		subcommand = args[1]
+	}
+
+	if command == "version" {
+		fmt.Printf(`{"success":true,"data":{"version":"%s"},"error":null}
+`, version)
+		return
+	}
+
+	// Create app
+	absStoreDir, _ := filepath.Abs(*storeDir)
+	app, err := commands.NewApp(absStoreDir, version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, `{"success":false,"data":null,"error":"Failed to initialize: %v"}
+`, err)
+		os.Exit(1)
+	}
+	defer app.Close()
+
+	// Use different timeout for sync command
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if command == "sync" {
+		// For sync, use signal-based cancellation
+		ctx, cancel = context.WithCancel(context.Background())
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			cancel()
+		}()
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Minute)
+	}
+	defer cancel()
+
+	var result string
+
+	switch command {
+	case "auth":
+		result = app.Auth(ctx)
+
+	case "status":
+		result = app.Status(ctx)
+
+	case "sync":
+		result = app.Sync(ctx)
+
+	case "profile":
+		result = app.GetProfile(ctx)
+
+	case "messages":
+		messagesCmd := flag.NewFlagSet("messages", flag.ExitOnError)
+		chatJID := messagesCmd.String("chat", "", "chat JID")
+		query := messagesCmd.String("query", "", "search query")
+		limit := messagesCmd.Int("limit", 20, "limit")
+		page := messagesCmd.Int("page", 0, "page")
+		// Parse from args[2:] to skip subcommand ("list"/"search") —
+		// Go's flag parser stops at the first non-flag argument.
+		if len(args) > 2 {
+			messagesCmd.Parse(args[2:])
+		}
+
+		if subcommand == "search" || *query != "" {
+			result = app.ListMessages(nil, query, *limit, *page)
+		} else {
+			var chatPtr *string
+			if *chatJID != "" {
+				chatPtr = chatJID
+			}
+			result = app.ListMessages(chatPtr, nil, *limit, *page)
+		}
+
+	case "listen":
+		listenCmd := flag.NewFlagSet("listen", flag.ExitOnError)
+		redisURL := listenCmd.String("redis-url", "redis://redis:6379/0", "Redis URL")
+		userID := listenCmd.String("user-id", "", "User ID for channel")
+		if len(args) > 1 {
+			listenCmd.Parse(args[1:])
+		}
+		if *userID == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--user-id required"}`)
+			os.Exit(1)
+		}
+		result = app.Listen(ctx, *redisURL, *userID)
+
+	case "contacts":
+		contactsCmd := flag.NewFlagSet("contacts", flag.ExitOnError)
+		query := contactsCmd.String("query", "", "search query")
+		// Parse from args[2:] to skip subcommand ("search") —
+		// Go's flag parser stops at the first non-flag argument.
+		if len(args) > 2 {
+			contactsCmd.Parse(args[2:])
+		}
+
+		if *query == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--query required"}`)
+			os.Exit(1)
+		}
+		result = app.SearchContacts(*query)
+
+	case "chats":
+		chatsCmd := flag.NewFlagSet("chats", flag.ExitOnError)
+		query := chatsCmd.String("query", "", "search query")
+		limit := chatsCmd.Int("limit", 20, "limit")
+		page := chatsCmd.Int("page", 0, "page")
+		// Parse from args[2:] to skip subcommand ("list") —
+		// Go's flag parser stops at the first non-flag argument.
+		if len(args) > 2 {
+			chatsCmd.Parse(args[2:])
+		}
+
+		var queryPtr *string
+		if *query != "" {
+			queryPtr = query
+		}
+		result = app.ListChats(queryPtr, *limit, *page)
+
+	case "send":
+		sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
+		to := sendCmd.String("to", "", "recipient")
+		message := sendCmd.String("message", "", "message text")
+		sendCmd.Parse(args[1:])
+
+		if *to == "" || *message == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--to and --message required"}`)
+			os.Exit(1)
+		}
+		result = app.SendMessage(ctx, *to, *message)
+
+	case "presence":
+		presenceCmd := flag.NewFlagSet("presence", flag.ExitOnError)
+		to := presenceCmd.String("to", "", "recipient")
+		presenceType := presenceCmd.String("type", "typing", "presence type (typing, paused)")
+		presenceCmd.Parse(args[1:])
+
+		if *to == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--to required"}`)
+			os.Exit(1)
+		}
+		isTyping := *presenceType == "typing"
+		result = app.SendPresence(ctx, *to, isTyping)
+
+	case "check-number":
+		checkCmd := flag.NewFlagSet("check-number", flag.ExitOnError)
+		phone := checkCmd.String("phone", "", "phone number to check")
+		checkCmd.Parse(args[1:])
+
+		if *phone == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--phone required"}`)
+			os.Exit(1)
+		}
+		result = app.CheckNumber(ctx, *phone)
+
+	case "media":
+		if subcommand != "download" {
+			fmt.Fprintf(os.Stderr, "{\"success\":false,\"data\":null,\"error\":\"Unknown media subcommand: %s\"}\n", subcommand)
+			os.Exit(1)
+		}
+		downCmd := flag.NewFlagSet("media download", flag.ExitOnError)
+		messageID := downCmd.String("message-id", "", "message identifier")
+		chatJID := downCmd.String("chat", "", "chat JID (optional)")
+		outputPath := downCmd.String("output", "", "output file or directory")
+		downCmd.Parse(args[2:])
+
+		if *messageID == "" {
+			fmt.Fprintln(os.Stderr, `{"success":false,"data":null,"error":"--message-id required"}`)
+			os.Exit(1)
+		}
+		var chatPtr *string
+		if *chatJID != "" {
+			chatPtr = chatJID
+		}
+		result = app.DownloadMedia(ctx, *messageID, chatPtr, *outputPath)
+
+	default:
+		fmt.Fprintf(os.Stderr, `{"success":false,"data":null,"error":"Unknown command: %s"}
+`, command)
+		os.Exit(1)
+	}
+
+	fmt.Println(result)
+}
