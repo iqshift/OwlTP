@@ -133,12 +133,12 @@ export default function LogsPage() {
                   <td className="px-6 py-4">
                     <span
                       className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${
-                        log.status === "sent"
-                          ? "bg-green-500/20 text-green-500"
-                          : "bg-red-500/20 text-red-500"
+                        log.status === "failed"
+                          ? "bg-red-500/20 text-red-500"
+                          : "bg-green-500/20 text-green-500"
                       }`}
                     >
-                      {log.status}
+                      {log.status === "failed" ? "فشل" : "أرسل"}
                     </span>
                   </td>
                   <td className="px-6 py-4 text-slate-500">

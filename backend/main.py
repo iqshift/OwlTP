@@ -697,7 +697,7 @@ def send_otp(
 
     return schemas.SendOTPResponse(
         success=True, 
-        status="queued", 
+        status="sent", 
         message_id=str(new_msg.id)
     )
 
