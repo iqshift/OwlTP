@@ -129,6 +129,10 @@ class WhatsAppService:
         presence_type = "typing" if is_typing else "paused"
         return self.run_command(user_id, ["presence", "--to", phone, "--type", presence_type])
 
+    def check_number(self, user_id: str, phone: str) -> Dict[str, Any]:
+        """Checks if a phone number is registered on WhatsApp."""
+        return self.run_command(user_id, ["check-number", "--phone", phone])
+
     def is_sleep_time(self) -> bool:
         """Checks if current time is within 2 AM to 7 AM sleep window."""
         now = datetime.now()

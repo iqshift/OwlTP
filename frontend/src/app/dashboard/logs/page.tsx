@@ -8,6 +8,7 @@ type MessageLog = {
   phone: string;
   message: string;
   status: string;
+  error?: string;
   created_at: string;
 };
 
@@ -131,15 +132,22 @@ export default function LogsPage() {
                     {log.message}
                   </td>
                   <td className="px-6 py-4">
-                    <span
-                      className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${
-                        log.status === "failed"
-                          ? "bg-red-500/20 text-red-500"
-                          : "bg-green-500/20 text-green-500"
-                      }`}
-                    >
-                      {log.status === "failed" ? "فشل" : "أرسل"}
-                    </span>
+                    <div className="flex flex-col gap-1">
+                      <span
+                        className={`inline-block w-fit rounded-full px-2 py-1 text-[10px] font-bold uppercase ${
+                          log.status === "failed"
+                            ? "bg-red-500/20 text-red-500"
+                            : "bg-green-500/20 text-green-500"
+                        }`}
+                      >
+                        {log.status === "failed" ? "فشل" : "تم الإرسال"}
+                      </span>
+                      {log.status === "failed" && log.error && (
+                        <span className="text-[9px] text-red-400 line-clamp-1 max-w-[150px]" title={log.error}>
+                          {log.error}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-6 py-4 text-slate-500">
                     {new Date(log.created_at).toLocaleString()}

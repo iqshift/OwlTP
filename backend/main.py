@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import uuid
 import os
 import io
+import re
 import base64
 import qrcode
 import time
@@ -586,6 +587,13 @@ def regenerate_api_key(
     )
 
 
+import re
+
+def validate_phone(phone: str) -> bool:
+    # Universal regex for international numbers (7 to 15 digits)
+    # This supports almost all global phone numbering plans (E.164 standard)
+    return bool(re.match(r"^[0-9]{7,15}$", phone))
+
 @v1_router.post("/send", response_model=schemas.SendOTPResponse)
 @limiter.limit("30/minute")
 def send_otp(
@@ -618,6 +626,9 @@ def send_otp(
 
     if not user:
         raise HTTPException(status_code=403, detail="Invalid API Token")
+
+    # 🧼 CLEAN: Remove any non-numeric characters from phone
+    payload.phone = re.sub(r"\D", "", payload.phone)
 
     # 1. Build final message template for the worker:
     # {greeting} {name}\n{otp_template}
@@ -656,6 +667,13 @@ def send_otp(
         )
 
     # 5. Validation
+    if not validate_phone(payload.phone):
+        r.delete(lock_key)
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid phone number format. Must be 964 followed by 9-10 digits."
+        )
+
     if not payload.code.isdigit():
         r.delete(lock_key)
         raise HTTPException(status_code=400, detail="OTP code must contain digits only")

@@ -4,6 +4,7 @@ import json
 import threading
 import redis
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 from celery import Celery
@@ -161,18 +162,33 @@ def send_otp_message(user_id: str, phone: str, message: str, code: str = None, n
     """
     Background send job. Applies Anti-Ban settings from user profile.
     """
+    # 🧼 CLEAN: Remove any non-numeric characters or whitespace from phone
+    phone = re.sub(r"\D", "", phone)
+    
     db = database.SessionLocal()
     try:
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user:
+            # Update msg record to failed if user not found
+            msg_record = db.query(models.Message).filter(models.Message.id == message_id).first()
+            if msg_record:
+                msg_record.status = "failed"
+                msg_record.error = "User not found"
+                db.commit()
             return {"success": False, "error": "User not found"}
 
-        # Use "User" if no name provided
-        safe_name = name if name else "User"
+        # 🔍 PRE-SEND CHECK: Is this number actually on WhatsApp?
+        print(f"DEBUG: Performing pre-send verification for {phone}")
+        check_res = ws.check_number(user_id, phone)
+        if not check_res.get("exists"):
+            msg_record = db.query(models.Message).filter(models.Message.id == message_id).first()
+            if msg_record:
+                msg_record.status = "failed"
+                msg_record.error = "Phone number is not registered on WhatsApp"
+                db.commit()
+            return {"success": False, "error": "Phone number not on WhatsApp"}
 
-        # Settings dictionary for the service
         settings = {
-            "account_protection": user.account_protection,
             "interaction_strategy": user.interaction_strategy,
             "sleep_cycles": user.sleep_cycles,
             "spintax_enabled": user.spintax_enabled,
@@ -211,40 +227,58 @@ def send_otp_message(user_id: str, phone: str, message: str, code: str = None, n
 
             # 2. Create a pending OTP request
             expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+            safe_name = name if name else "User"
             otp_req = models.OTPRequest(
                 user_id=user.id,
                 phone=phone,
                 code=code,
-                template=message,
+                template=user.otp_template or "Your verification code is: {code}",
                 status="pending",
                 expires_at=expires_at,
-                message_id=message_id
+                message_id=message_id,
+                name=safe_name
             )
-            otp_req.name = safe_name
-            
             db.add(otp_req)
             db.commit()
 
             # 3. Send the custom Interaction Question
             prompt = user.interaction_question.replace("{name}", safe_name)
-            return ws.send_message_advanced(user_id, phone, prompt, settings)
-
-        # Handle Spintax or Normal message
-        final_message = message
-        if settings.get("spintax_enabled") == "true" and code:
-            # Use the 3 custom variations from DB
-            options = [user.spintax_1, user.spintax_2, user.spintax_3]
-            final_message = random.choice(options)
-        
-        # Inject code and name into the final message
-        if "{code}" not in final_message:
-            final_message += f" {code}"
-        else:
-            final_message = final_message.replace("{code}", str(code))
+            result = ws.send_message_advanced(user_id, phone, prompt, settings)
             
-        final_message = final_message.replace("{name}", safe_name)
+            # 🔑 CRITICAL: Update main message record if question fails
+            if message_id:
+                msg_record = db.query(models.Message).filter(models.Message.id == message_id).first()
+                if msg_record:
+                    if not result.get("success"):
+                        msg_record.status = "failed"
+                        msg_record.error = result.get("error")
+                        msg_record.message = prompt
+                        db.commit()
+                    else:
+                        # Success here means question was sent. We keep it as "sent" (optimistic)
+                        # but we update the message body to show what was actually sent
+                        msg_record.message = prompt
+                        db.commit()
+            return result
 
-        result = ws.send_message_advanced(user_id, phone, final_message, settings)
+        # Handle Normal Direct Send
+        safe_name = name if name else "User"
+        final_msg = user.otp_template or "Your verification code is: {code}"
+        
+        # Apply Spintax if enabled
+        if settings.get("spintax_enabled") == "true" and code:
+            options = [user.spintax_1, user.spintax_2, user.spintax_3]
+            final_msg = random.choice(options)
+
+        # Inject code and name
+        if "{code}" in final_msg:
+            final_msg = final_msg.replace("{code}", str(code))
+        else:
+            final_msg = f"{final_msg} {code}"
+        
+        final_msg = final_msg.replace("{name}", safe_name)
+
+        result = ws.send_message_advanced(user_id, phone, final_msg, settings)
         
         # 9. Update Message status in DB
         if message_id:
@@ -253,8 +287,8 @@ def send_otp_message(user_id: str, phone: str, message: str, code: str = None, n
                 msg_record.status = "sent" if result.get("success") else "failed"
                 if not result.get("success"):
                     msg_record.error = result.get("error")
-                # Also update message content with final rendered version
-                msg_record.message = final_message
+                # Update log with the actual rendered message
+                msg_record.message = final_msg
                 db.commit()
 
         return result
